@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "charlotte-freight-train-warning"
+version = "0.1.0"
+description = "TomTom/FRA freight-train early warning service for Charlotte, Michigan"
+requires-python = ">=3.12"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.setuptools.packages.find]
+include = ["train_tracker*"]
+

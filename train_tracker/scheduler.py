@@ -1,0 +1,242 @@
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+from datetime import datetime, timedelta, timezone
+from statistics import median
+
+from sqlalchemy import select
+
+from .config import settings
+from .calibration import update_crossing_quality
+from .crossings import CrossingManager
+from .db import SessionLocal, session_scope, utc_now
+from .detection import classify_traffic
+from .models import Crossing, CrossingEvent, SystemState, TrafficObservation
+from .tomtom import RequestBudgetExceeded, TileKey, TomTomError
+from .traffic import TileMapping, observation_from_tiles
+from .train_tracker import refresh_hypotheses
+from .usage import UsageService
+
+LOGGER = logging.getLogger(__name__)
+
+GROUP_OFFSETS = {"Battle Creek": 0, "Lansing": 20, "Durand": 40}
+
+
+def interval_for(crossing: Crossing, burst: bool = False, projected: int | None = None) -> int:
+    if burst:
+        return 60
+    if crossing.role == "primary":
+        return 120
+    if projected is not None and projected >= settings.soft_request_budget:
+        return 360 if projected >= settings.monthly_request_budget else 300
+    return 240
+
+
+def due_crossings(crossings, now: datetime, last_polled: dict[int, datetime], burst_groups: set[str] | None = None, projected: int | None = None):
+    burst_groups = burst_groups or set()
+    epoch = now.timestamp()
+    due = []
+    for crossing in crossings:
+        if not crossing.enabled:
+            continue
+        burst = crossing.group_name in burst_groups
+        interval = interval_for(crossing, burst, projected)
+        last = last_polled.get(crossing.id)
+        if last is not None:
+            if (now - last).total_seconds() >= interval:
+                due.append(crossing)
+            continue
+        phase = GROUP_OFFSETS.get(crossing.group_name, 0) + crossing.phase_sec
+        aligned = epoch - (epoch % interval) + phase
+        if aligned > epoch:
+            aligned -= interval
+        if epoch - aligned < 15:
+            due.append(crossing)
+    return due
+
+
+class PollScheduler:
+    def __init__(self, tomtom_client, session_factory=SessionLocal, usage_service: UsageService | None = None):
+        self.tomtom = tomtom_client
+        self.session_factory = session_factory
+        self.usage = usage_service or UsageService(session_factory)
+        self.last_polled: dict[int, datetime] = {}
+        self.burst_until: dict[str, datetime] = {}
+        self.last_run: datetime | None = None
+        self.last_error: str | None = None
+        self.stop_event = asyncio.Event()
+
+    def _burst_groups(self, now: datetime) -> set[str]:
+        return {group for group, until in self.burst_until.items() if until > now}
+
+    def _mark_burst(self, group: str, now: datetime) -> None:
+        self.burst_until[group] = max(self.burst_until.get(group, now), now + timedelta(minutes=20))
+
+    def _save_system_state(self, key: str, value: dict) -> None:
+        with session_scope() as session:
+            row = session.get(SystemState, key)
+            if row is None:
+                row = SystemState(key=key, value_json=value, updated_at=utc_now())
+                session.add(row)
+            else:
+                row.value_json = value
+                row.updated_at = utc_now()
+
+    def _previous_metrics(self, session, crossing_id: int, now: datetime):
+        observations = list(
+            session.scalars(
+                select(TrafficObservation)
+                .where(TrafficObservation.crossing_id == crossing_id, TrafficObservation.observed_at < now, TrafficObservation.usable.is_(True))
+                .order_by(TrafficObservation.observed_at.desc())
+                .limit(20)
+            ).all()
+        )
+        previous = observations[0].traffic_level_median if observations else None
+        levels = [item.traffic_level_median for item in observations if item.traffic_level_median is not None]
+        return previous, median(levels) if levels else None
+
+    def _create_event_if_new(self, session, crossing: Crossing, observation: TrafficObservation, decision) -> bool:
+        if decision.severity not in {"WEAK", "MODERATE", "STRONG"}:
+            return False
+        last_event = session.scalar(
+            select(CrossingEvent)
+            .where(CrossingEvent.crossing_id == crossing.id)
+            .order_by(CrossingEvent.event_time_estimate.desc())
+            .limit(1)
+        )
+        if last_event is not None:
+            normal_after = session.scalar(
+                select(TrafficObservation)
+                .where(
+                    TrafficObservation.crossing_id == crossing.id,
+                    TrafficObservation.observed_at > last_event.event_time_high,
+                    TrafficObservation.severity == "NORMAL",
+                )
+                .order_by(TrafficObservation.observed_at.desc())
+                .limit(1)
+            )
+            if normal_after is None and (observation.observed_at - last_event.event_time_estimate).total_seconds() < 20 * 60:
+                return False
+        previous = session.scalar(
+            select(TrafficObservation)
+            .where(TrafficObservation.crossing_id == crossing.id, TrafficObservation.observed_at < observation.observed_at)
+            .order_by(TrafficObservation.observed_at.desc())
+            .limit(1)
+        )
+        low = previous.observed_at if previous else observation.observed_at - timedelta(seconds=crossing.poll_interval_sec or 240)
+        high = observation.observed_at
+        event_time = low + (high - low) / 2
+        event = CrossingEvent(
+            crossing_id=crossing.id,
+            event_time_estimate=event_time,
+            event_time_low=low,
+            event_time_high=high,
+            severity=decision.severity,
+            evidence_json={
+                "traffic_level_min": observation.traffic_level_min,
+                "traffic_level_median": observation.traffic_level_median,
+                "previous_level": previous.traffic_level_median if previous else None,
+                "baseline_level": decision.baseline,
+                "drop": decision.drop,
+                "score": decision.score,
+                "feature_count": observation.feature_count,
+                "status": observation.status,
+            },
+            created_at=utc_now(),
+        )
+        session.add(event)
+        return True
+
+    def poll_crossing(self, crossing_id: int, now: datetime | None = None) -> bool:
+        now = now or utc_now()
+        with session_scope() as session:
+            crossing = session.get(Crossing, crossing_id)
+            if crossing is None or not crossing.enabled:
+                return False
+            mapping = TileMapping.from_dict(crossing.tile_mapping_json)
+            tile_key = mapping.tiles if mapping else ()
+            try:
+                responses = [self.tomtom.fetch_tile(key) for key in tile_key]
+                result = observation_from_tiles(crossing, responses, now)
+                previous, baseline = self._previous_metrics(session, crossing.id, now)
+                decision = classify_traffic(result.traffic_level_median, previous, baseline, result.road_closure)
+                observation = TrafficObservation(
+                    crossing_id=crossing.id,
+                    observed_at=result.observed_at,
+                    tile_fetched_at=result.tile_fetched_at,
+                    traffic_level_min=result.traffic_level_min,
+                    traffic_level_median=result.traffic_level_median,
+                    directional_values=result.directional_values,
+                    road_coverage=result.road_coverage,
+                    road_closure=result.road_closure,
+                    feature_count=result.feature_count,
+                    usable=result.usable,
+                    severity=decision.severity,
+                    anomaly_drop=decision.drop,
+                    anomaly_score=decision.score,
+                    status=result.status,
+                    error_detail=result.error_detail,
+                    tile_key=",".join(key.as_string() for key in tile_key),
+                )
+                session.add(observation)
+                created = self._create_event_if_new(session, crossing, observation, decision)
+                session.flush()
+                update_crossing_quality(session, crossing, now)
+                CrossingManager.assign_roles(session)
+                if created:
+                    self._mark_burst(crossing.group_name, now)
+                refresh_hypotheses(session, now)
+                return result.usable
+            except (TomTomError, RequestBudgetExceeded, ValueError) as exc:
+                session.add(
+                    TrafficObservation(
+                        crossing_id=crossing.id,
+                        observed_at=now,
+                        usable=False,
+                        severity="UNKNOWN",
+                        status="ERROR",
+                        error_detail=str(exc)[:1000],
+                        tile_key=",".join(key.as_string() for key in tile_key),
+                    )
+                )
+                self.last_error = str(exc)
+                return False
+
+    def poll_due(self, now: datetime | None = None) -> int:
+        now = now or utc_now()
+        with self.session_factory() as session:
+            crossings = list(session.scalars(select(Crossing).where(Crossing.enabled.is_(True))).all())
+            projected = self.usage.projected_monthly_requests(session)
+        due = due_crossings(crossings, now, self.last_polled, self._burst_groups(now), projected)
+        count = 0
+        cycle_failed = False
+        for crossing in due:
+            if not self.poll_crossing(crossing.id, now):
+                cycle_failed = True
+            self.last_polled[crossing.id] = now
+            count += 1
+        if due and not cycle_failed:
+            self.last_error = None
+        self.last_run = now
+        try:
+            self._save_system_state("poller", {"last_run": now.isoformat(), "last_error": self.last_error, "polled": count})
+        except Exception as exc:
+            LOGGER.exception("Unable to persist poller health: %s", exc)
+        return count
+
+    async def run_forever(self) -> None:
+        while not self.stop_event.is_set():
+            try:
+                await asyncio.to_thread(self.poll_due)
+            except Exception as exc:
+                self.last_error = str(exc)
+                LOGGER.exception("Poll cycle failed")
+            try:
+                await asyncio.wait_for(self.stop_event.wait(), timeout=10)
+            except asyncio.TimeoutError:
+                pass
+
+    async def stop(self) -> None:
+        self.stop_event.set()
