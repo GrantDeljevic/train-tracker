@@ -6,15 +6,22 @@ from typing import Iterator
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.pool import StaticPool
 
 from .config import settings
 from .models import Base
 
 
-engine_kwargs = {"pool_pre_ping": True}
-if settings.database_url.startswith("sqlite"):
-    engine_kwargs["connect_args"] = {"check_same_thread": False}
-engine = create_engine(settings.database_url, **engine_kwargs)
+# This is deliberately process-local.  Heroku's filesystem is ephemeral, so a
+# file-backed database would give a false impression of durability.  Durable
+# history is handled by sheets.py; this store exists only for current runtime
+# state and is intentionally rebuilt from the checked-in crossing config after
+# a restart.
+engine = create_engine(
+    "sqlite://",
+    connect_args={"check_same_thread": False},
+    poolclass=StaticPool,
+)
 SessionLocal = sessionmaker(bind=engine, expire_on_commit=False, class_=Session)
 
 
@@ -38,4 +45,3 @@ def session_scope() -> Iterator[Session]:
         raise
     finally:
         session.close()
-

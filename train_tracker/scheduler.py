@@ -10,10 +10,10 @@ from sqlalchemy import select
 
 from .config import settings
 from .calibration import update_crossing_quality
-from .crossings import CrossingManager
 from .db import SessionLocal, session_scope, utc_now
 from .detection import classify_traffic
 from .models import Crossing, CrossingEvent, SystemState, TrafficObservation
+from .sheets import GoogleSheetsArchive
 from .tomtom import RequestBudgetExceeded, TileKey, TomTomError
 from .traffic import TileMapping, observation_from_tiles
 from .train_tracker import refresh_hypotheses
@@ -58,10 +58,11 @@ def due_crossings(crossings, now: datetime, last_polled: dict[int, datetime], bu
 
 
 class PollScheduler:
-    def __init__(self, tomtom_client, session_factory=SessionLocal, usage_service: UsageService | None = None):
+    def __init__(self, tomtom_client, session_factory=SessionLocal, usage_service: UsageService | None = None, archive: GoogleSheetsArchive | None = None):
         self.tomtom = tomtom_client
         self.session_factory = session_factory
         self.usage = usage_service or UsageService(session_factory)
+        self.archive = archive
         self.last_polled: dict[int, datetime] = {}
         self.burst_until: dict[str, datetime] = {}
         self.last_run: datetime | None = None
@@ -97,9 +98,9 @@ class PollScheduler:
         levels = [item.traffic_level_median for item in observations if item.traffic_level_median is not None]
         return previous, median(levels) if levels else None
 
-    def _create_event_if_new(self, session, crossing: Crossing, observation: TrafficObservation, decision) -> bool:
+    def _create_event_if_new(self, session, crossing: Crossing, observation: TrafficObservation, decision) -> CrossingEvent | None:
         if decision.severity not in {"WEAK", "MODERATE", "STRONG"}:
-            return False
+            return None
         last_event = session.scalar(
             select(CrossingEvent)
             .where(CrossingEvent.crossing_id == crossing.id)
@@ -118,7 +119,7 @@ class PollScheduler:
                 .limit(1)
             )
             if normal_after is None and (observation.observed_at - last_event.event_time_estimate).total_seconds() < 20 * 60:
-                return False
+                return None
         previous = session.scalar(
             select(TrafficObservation)
             .where(TrafficObservation.crossing_id == crossing.id, TrafficObservation.observed_at < observation.observed_at)
@@ -147,10 +148,76 @@ class PollScheduler:
             created_at=utc_now(),
         )
         session.add(event)
-        return True
+        return event
+
+    @staticmethod
+    def _observation_payload(crossing: Crossing, observation: TrafficObservation, recorded_at: datetime) -> dict:
+        return {
+            "recorded_at": recorded_at,
+            "crossing_fra_id": crossing.fra_id,
+            "crossing_name": crossing.name,
+            "group": crossing.group_name,
+            "milepost": crossing.milepost,
+            "observed_at": observation.observed_at,
+            "tile_fetched_at": observation.tile_fetched_at,
+            "traffic_level_min": observation.traffic_level_min,
+            "traffic_level_median": observation.traffic_level_median,
+            "directional_values": observation.directional_values,
+            "road_coverage": observation.road_coverage,
+            "road_closure": observation.road_closure,
+            "feature_count": observation.feature_count,
+            "usable": observation.usable,
+            "severity": observation.severity,
+            "anomaly_drop": observation.anomaly_drop,
+            "anomaly_score": observation.anomaly_score,
+            "status": observation.status,
+            "error_detail": observation.error_detail,
+            "tile_key": observation.tile_key,
+        }
+
+    @staticmethod
+    def _event_payload(crossing: Crossing, event: CrossingEvent, recorded_at: datetime) -> dict:
+        return {
+            "recorded_at": recorded_at,
+            "event_id": event.id,
+            "crossing_fra_id": crossing.fra_id,
+            "crossing_name": crossing.name,
+            "group": crossing.group_name,
+            "milepost": crossing.milepost,
+            "event_time_estimate": event.event_time_estimate,
+            "event_time_low": event.event_time_low,
+            "event_time_high": event.event_time_high,
+            "severity": event.severity,
+            "evidence_json": event.evidence_json,
+        }
+
+    @staticmethod
+    def _hypothesis_payload(row, crossing_by_id: dict[int, Crossing], recorded_at: datetime) -> dict:
+        crossing = crossing_by_id.get(row.last_crossing_id) if row.last_crossing_id else None
+        return {
+            "recorded_at": recorded_at,
+            "hypothesis_id": row.id,
+            "direction": row.direction,
+            "status": row.status,
+            "evidence_level": row.evidence_level,
+            "source_group": row.source_group,
+            "first_seen_at": row.first_seen_at,
+            "last_seen_at": row.last_seen_at,
+            "last_crossing_fra_id": crossing.fra_id if crossing else "",
+            "last_milepost": row.last_milepost,
+            "estimated_speed_mph": row.estimated_speed,
+            "eta": row.eta,
+            "eta_low": row.eta_low,
+            "eta_high": row.eta_high,
+            "event_ids": row.event_ids,
+        }
 
     def poll_crossing(self, crossing_id: int, now: datetime | None = None) -> bool:
         now = now or utc_now()
+        sheet_observation = None
+        sheet_event = None
+        sheet_hypotheses = []
+        sheet_calibration = None
         with session_scope() as session:
             crossing = session.get(Crossing, crossing_id)
             if crossing is None or not crossing.enabled:
@@ -183,26 +250,47 @@ class PollScheduler:
                 session.add(observation)
                 created = self._create_event_if_new(session, crossing, observation, decision)
                 session.flush()
-                update_crossing_quality(session, crossing, now)
-                CrossingManager.assign_roles(session)
-                if created:
+                quality = update_crossing_quality(session, crossing, now)
+                if created is not None:
                     self._mark_burst(crossing.group_name, now)
-                refresh_hypotheses(session, now)
-                return result.usable
+                hypotheses = refresh_hypotheses(session, now)
+                sheet_observation = self._observation_payload(crossing, observation, now)
+                sheet_event = self._event_payload(crossing, created, now) if created is not None else None
+                crossing_by_id = {item.id: item for item in session.scalars(select(Crossing)).all()}
+                sheet_hypotheses = [self._hypothesis_payload(row, crossing_by_id, now) for row in hypotheses]
+                if quality.get("observation_count", 0) == 1 or quality.get("observation_count", 0) % 10 == 0:
+                    sheet_calibration = {
+                        "recorded_at": now,
+                        "crossing_fra_id": crossing.fra_id,
+                        "crossing_name": crossing.name,
+                        "group": crossing.group_name,
+                        **quality,
+                    }
+                usable = result.usable
             except (TomTomError, RequestBudgetExceeded, ValueError) as exc:
-                session.add(
-                    TrafficObservation(
-                        crossing_id=crossing.id,
-                        observed_at=now,
-                        usable=False,
-                        severity="UNKNOWN",
-                        status="ERROR",
-                        error_detail=str(exc)[:1000],
-                        tile_key=",".join(key.as_string() for key in tile_key),
-                    )
+                observation = TrafficObservation(
+                    crossing_id=crossing.id,
+                    observed_at=now,
+                    usable=False,
+                    severity="UNKNOWN",
+                    status="ERROR",
+                    error_detail=str(exc)[:1000],
+                    tile_key=",".join(key.as_string() for key in tile_key),
                 )
+                session.add(observation)
                 self.last_error = str(exc)
-                return False
+                sheet_observation = self._observation_payload(crossing, observation, now)
+                usable = False
+        if self.archive is not None:
+            if sheet_observation:
+                self.archive.enqueue_observation(sheet_observation)
+            if sheet_event:
+                self.archive.enqueue_event(sheet_event)
+            for payload in sheet_hypotheses:
+                self.archive.enqueue_hypothesis(payload)
+            if sheet_calibration:
+                self.archive.enqueue_calibration(sheet_calibration)
+        return usable
 
     def poll_due(self, now: datetime | None = None) -> int:
         now = now or utc_now()
@@ -224,7 +312,16 @@ class PollScheduler:
             self._save_system_state("poller", {"last_run": now.isoformat(), "last_error": self.last_error, "polled": count})
         except Exception as exc:
             LOGGER.exception("Unable to persist poller health: %s", exc)
+        self.flush_archive_if_due(now)
         return count
+
+    def flush_archive_if_due(self, now: datetime | None = None, force: bool = False) -> bool:
+        if self.archive is None or not self.archive.connected:
+            return False
+        snapshot = self.usage.snapshot()
+        snapshot["recorded_at"] = now or utc_now()
+        self.archive.enqueue_usage(snapshot)
+        return self.archive.flush(force=force)
 
     async def run_forever(self) -> None:
         while not self.stop_event.is_set():
@@ -233,6 +330,10 @@ class PollScheduler:
             except Exception as exc:
                 self.last_error = str(exc)
                 LOGGER.exception("Poll cycle failed")
+            try:
+                await asyncio.to_thread(self.flush_archive_if_due)
+            except Exception as exc:
+                LOGGER.exception("Sheet archive cycle failed: %s", exc)
             try:
                 await asyncio.wait_for(self.stop_event.wait(), timeout=10)
             except asyncio.TimeoutError:

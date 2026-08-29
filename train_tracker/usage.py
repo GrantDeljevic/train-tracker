@@ -50,6 +50,19 @@ class UsageService:
             row.updated_at = utc_now()
             session.commit()
 
+    def restore(self, month: str, values: dict[str, int]) -> None:
+        """Restore only the small monthly counter checkpoint from Sheets."""
+        with self.session_factory() as session:
+            row = self._row(session, month)
+            for field in (
+                "actual_request_count", "successful_requests", "http_4xx", "http_429",
+                "http_5xx", "network_errors", "cache_dedupe_saves",
+            ):
+                if field in values:
+                    setattr(row, field, max(0, int(values[field])))
+            row.updated_at = utc_now()
+            session.commit()
+
     def allowed(self) -> bool:
         with self.session_factory() as session:
             return self._row(session).actual_request_count < self.hard_budget

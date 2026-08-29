@@ -12,4 +12,6 @@ dist/
 build/
 *.egg-info/
 logs/
-
+client_secret.json
+service-account*.json
+google-service-account*.json

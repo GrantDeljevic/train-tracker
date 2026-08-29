@@ -2,8 +2,9 @@
 
 An always-on FastAPI service that uses FRA grade-crossing metadata and TomTom
 traffic-flow vector tiles to watch eight railroad sentinels around Charlotte,
-Michigan. It stores raw traffic observations, inferred crossing events, and
-train hypotheses in PostgreSQL (SQLite is convenient for local development).
+Michigan. Validated crossing setup is checked into the repository. Current
+runtime state is process-local and historical observations, events, hypotheses,
+calibration, and usage checkpoints are appended to Google Sheets.
 
 ## Quick start
 
@@ -14,7 +15,6 @@ python -m pip install -r requirements.txt
 Copy-Item .env.example .env
 # Set TOMTOM_API_KEY in .env before live initialization.
 python -m train_tracker.cli init --live
-alembic upgrade head
 uvicorn train_tracker.main:app --reload
 ```
 
@@ -24,18 +24,26 @@ worker process.
 
 ## Configuration
 
-See `.env.example`. `DATABASE_URL` may be PostgreSQL or SQLite. The default
-TomTom endpoint is Traffic API v4 relative flow. Set
+See `.env.example`. The default TomTom endpoint is Traffic API v4 relative flow. Set
 `TOMTOM_FLOW_ENDPOINT=orbis` only when the account is enabled for the Orbis
 flow-tile API. `TOMTOM_FLOW_URL_TEMPLATE` can be used for a provider-compatible
 endpoint without changing detector code.
 
-`python -m train_tracker.cli init --live` resolves all configured FRA IDs,
-automatically selects the higher-quality Battle Creek candidate, tests tile
-coverage at zoom 16 through 18, and persists the selected tile/road metadata.
-Without `--live`, FRA metadata is still refreshed, but live coverage is left
-unknown and the service reports degraded data until a live initialization is
-performed.
+`python -m train_tracker.cli init --live` is a local setup command. It resolves
+all configured FRA IDs, automatically selects the higher-quality Battle Creek
+candidate, tests tile coverage at zoom 16 through 18, and writes the validated
+result to `config/validated_crossings.json`. Production startup loads that file
+directly; it does not repeat broad FRA discovery. If a configured crossing later
+loses live flow, it becomes UNKNOWN/DATA DEGRADED rather than being silently
+replaced at runtime.
+
+Google Sheets persistence follows the existing Curious Bot `pygsheets` service
+account pattern. Set `TRAIN_TRACKER_SHEET_ID` and either
+`GOOGLE_SERVICE_ACCOUNT_JSON` or `GOOGLE_SERVICE_ACCOUNT_FILE`. The service
+creates/uses append-only tabs for traffic observations, crossing events, train
+hypotheses, calibration, API usage, and an archive index. Monthly rotation uses
+the archive index to create a new period spreadsheet without putting a
+credential in the repository.
 
 ## Tests
 
@@ -44,11 +52,12 @@ pytest -q
 ```
 
 Tests use deterministic synthetic vector-tile-like features and mocked provider
-responses; they do not need a TomTom key or PostgreSQL.
+responses; they do not need a TomTom key or Google credentials.
 
 ## Deployment
 
-The `Procfile` uses a release phase for migrations and a single web process for
-FastAPI plus the background poller. Use a non-sleeping dyno and PostgreSQL.
-Deployment is intentionally a final step after local and live validation.
-
+The `Procfile` uses one web process for FastAPI plus the background poller. No
+Heroku Postgres add-on or release migration is required. Use the existing Google
+service-account infrastructure for durable Sheets history. The dyno must still
+remain available for the poller; deployment is intentionally a final step after
+local and live validation.

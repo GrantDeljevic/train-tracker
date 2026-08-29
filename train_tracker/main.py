@@ -10,12 +10,13 @@ from fastapi.responses import HTMLResponse
 from sqlalchemy import desc, select
 
 from .config import settings
-from .crossings import TARGET_FRA_ID, TARGET_MILEPOST, TARGET_NAME, CrossingManager
-from .db import SessionLocal, engine, init_db, session_scope, utc_now
+from .crossings import TARGET_FRA_ID, TARGET_MILEPOST, TARGET_NAME, load_static_configuration
+from .db import SessionLocal, init_db, session_scope, utc_now
 from .models import Crossing, CrossingEvent, SystemState, TrainHypothesis, TrafficObservation
 from .scheduler import PollScheduler
+from .sheets import GoogleSheetsArchive
 from .tomtom import TomTomClient
-from .usage import UsageService
+from .usage import UsageService, usage_month
 
 logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO), format="%(asctime)s %(levelname)s %(name)s %(message)s")
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -25,6 +26,7 @@ app = FastAPI(title="Charlotte Freight-Train Early Warning", version="0.1.0")
 poll_scheduler: PollScheduler | None = None
 poll_task: asyncio.Task | None = None
 tomtom_client: TomTomClient | None = None
+sheets_archive: GoogleSheetsArchive | None = None
 
 
 def _aware(value: datetime | None) -> datetime | None:
@@ -47,14 +49,21 @@ def _minutes_until(value: datetime | None, now: datetime) -> int | None:
 async def startup() -> None:
     init_db()
     with session_scope() as session:
-        CrossingManager.assign_roles(session)
-    global poll_scheduler, poll_task, tomtom_client
+        load_static_configuration(session)
+    global poll_scheduler, poll_task, tomtom_client, sheets_archive
+    sheets_archive = GoogleSheetsArchive()
+    sheets_archive.connect()
+    usage = UsageService(SessionLocal)
+    restored_usage = sheets_archive.load_usage(usage_month()) if sheets_archive.connected else None
+    if restored_usage:
+        usage.restore(usage_month(), restored_usage)
+        LOGGER.info("restored TomTom usage checkpoint for %s", usage_month())
     if settings.enable_poller:
         tomtom_client = TomTomClient(
-            usage_callback=UsageService(SessionLocal).record,
-            request_guard=UsageService(SessionLocal).allowed,
+            usage_callback=usage.record,
+            request_guard=usage.allowed,
         )
-        poll_scheduler = PollScheduler(tomtom_client)
+        poll_scheduler = PollScheduler(tomtom_client, usage_service=usage, archive=sheets_archive)
         poll_task = asyncio.create_task(poll_scheduler.run_forever())
         LOGGER.info("poller started with one in-process scheduler")
     else:
@@ -63,11 +72,13 @@ async def startup() -> None:
 
 @app.on_event("shutdown")
 async def shutdown() -> None:
-    global poll_task, tomtom_client
+    global poll_task, tomtom_client, sheets_archive
     if poll_scheduler:
         await poll_scheduler.stop()
     if poll_task:
         await poll_task
+    if poll_scheduler and sheets_archive:
+        await asyncio.to_thread(poll_scheduler.flush_archive_if_due, force=True)
     if tomtom_client:
         tomtom_client.close()
 
@@ -124,7 +135,10 @@ def api_status() -> dict:
                 observation = latest_valid.get(group)
                 age = (now - _aware(observation.observed_at)).total_seconds() if observation else None
                 valid_groups[group] = {"latest_valid_at": _iso(observation.observed_at) if observation else None, "age_seconds": age, "fresh": age is not None and age <= 10 * 60}
+            historical_health = sheets_archive.health() if sheets_archive else {"configured": False, "required": False, "connected": False}
             data_degraded = any(not value["fresh"] for value in valid_groups.values()) if crossings else True
+            if historical_health.get("required") and not historical_health.get("connected"):
+                data_degraded = True
             provider_error = (settings.enable_poller and not settings.tomtom_api_key) or any((latest := _latest_observation(session, crossing.id)) is not None and latest.status == "ERROR" for crossing in crossings)
             if provider_error:
                 state = "DATA DEGRADED"
@@ -161,12 +175,14 @@ def api_status() -> dict:
                     "poller_last_run": (health.value_json or {}).get("last_run") if health else None,
                     "poller_error": (health.value_json or {}).get("last_error") if health else None,
                     "api_key_configured": bool(settings.tomtom_api_key),
+                    "runtime_state_backend": "process-memory",
+                    "historical_persistence": historical_health,
                     "usage": usage,
                 },
             }
     except Exception as exc:
         LOGGER.exception("status query failed")
-        raise HTTPException(status_code=503, detail=f"database/status unavailable: {exc}") from exc
+        raise HTTPException(status_code=503, detail=f"runtime status unavailable: {exc}") from exc
 
 
 @app.get("/api/crossings")
@@ -203,9 +219,16 @@ def healthz() -> dict:
     try:
         with SessionLocal() as session:
             session.execute(select(1)).scalar_one()
-        return {"ok": True, "database": "ok", "poller": "running" if settings.enable_poller else "disabled", "time": _iso(utc_now())}
+        historical = sheets_archive.health() if sheets_archive else {"configured": False, "required": False, "connected": False}
+        ok = not historical.get("required") or historical.get("connected")
+        response = {"ok": ok, "runtime_state": "memory", "historical_persistence": historical, "poller": "running" if settings.enable_poller else "disabled", "time": _iso(utc_now())}
+        if not ok:
+            raise HTTPException(status_code=503, detail=response)
+        return response
     except Exception as exc:
-        raise HTTPException(status_code=503, detail=f"database unavailable: {exc}") from exc
+        if isinstance(exc, HTTPException):
+            raise
+        raise HTTPException(status_code=503, detail=f"runtime state unavailable: {exc}") from exc
 
 
 DASHBOARD_HTML = r"""<!doctype html>

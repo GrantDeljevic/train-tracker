@@ -1,0 +1,395 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-08-29T05:50:34.253306+00:00",
+  "setup_only": true,
+  "sources": {
+    "fra_layer": "https://services.arcgis.com/xOi1kZaI0eWDREZv/ArcGIS/rest/services/NTAD_Railroad_Grade_Crossings/FeatureServer/0",
+    "tomtom_endpoint": "v4 relative flow",
+    "tomtom_probe_zooms": [
+      16,
+      17,
+      18
+    ],
+    "tomtom_matching_radius_m": 75.0
+  },
+  "target": {
+    "fra_id": "283602W",
+    "name": "Lawrence St / M-79",
+    "road_name": "LAWRENCE ST/M79",
+    "railroad": "GTW",
+    "subdivision": "FLINT",
+    "milepost": 201.89,
+    "latitude": 42.56393,
+    "longitude": -84.8425,
+    "aadt": 10000,
+    "aadt_year": 1993,
+    "fra_revision_date": "2026-07-23T12:53:47.230000+00:00",
+    "validated": true
+  },
+  "crossings": [
+    {
+      "fra_id": "283559T",
+      "name": "Pine Lake Rd",
+      "road_name": "PINE LAKE RD",
+      "railroad": "GTW",
+      "subdivision": "FLINT",
+      "milepost": 182.48,
+      "latitude": 42.37262,
+      "longitude": -85.10267,
+      "aadt": 1213,
+      "aadt_year": 2009,
+      "fra_revision_date": "2026-07-23T12:53:47.230000+00:00",
+      "group": "Battle Creek",
+      "role": "backup",
+      "poll_interval_sec": 240,
+      "phase_sec": 60,
+      "tile_zoom": 16,
+      "tile_mapping": {
+        "zoom": 16,
+        "tiles": [
+          {"z": 16, "x": 17275, "y": 24236, "flow_type": "relative"}
+        ],
+        "signatures": [
+          {"road_type": "Local road", "road_category": "street", "road_subcategory": "local", "distance_m": 1.56},
+          {"road_type": "Local road", "road_category": "street", "road_subcategory": "local", "distance_m": 1.56}
+        ],
+        "max_distance_m": 75.0,
+        "geometry_score": 0.9792,
+        "validated_at_setup": true
+      },
+      "coverage_score": 0.9792,
+      "tomtom": {
+        "validated": true,
+        "flow_type": "relative",
+        "geometry_max_distance_m": 75.0,
+        "selected_road_geometry": [
+          {"road_type": "Local road", "road_category": "street", "road_subcategory": "local", "distance_m": 1.56},
+          {"road_type": "Local road", "road_category": "street", "road_subcategory": "local", "distance_m": 1.56}
+        ]
+      },
+      "selection": {"configured_fra_id": "283559T", "decision": "selected"}
+    },
+    {
+      "fra_id": "283569Y",
+      "name": "Sand Road",
+      "road_name": "SAND ROAD",
+      "railroad": "GTW",
+      "subdivision": "FLINT",
+      "milepost": 188.45,
+      "latitude": 42.43738,
+      "longitude": -85.03065,
+      "aadt": 1602,
+      "aadt_year": 2004,
+      "fra_revision_date": "2026-07-23T12:53:47.230000+00:00",
+      "group": "Battle Creek",
+      "role": "backup",
+      "poll_interval_sec": 240,
+      "phase_sec": 180,
+      "tile_zoom": 16,
+      "tile_mapping": {
+        "zoom": 16,
+        "tiles": [
+          {"z": 16, "x": 17288, "y": 24220, "flow_type": "relative"}
+        ],
+        "signatures": [
+          {"road_type": "Major local road", "road_category": "tertiary", "road_subcategory": "major_local", "distance_m": 1.28},
+          {"road_type": "Major local road", "road_category": "tertiary", "road_subcategory": "major_local", "distance_m": 1.28}
+        ],
+        "max_distance_m": 75.0,
+        "geometry_score": 0.9829333333333333,
+        "validated_at_setup": true
+      },
+      "coverage_score": 0.9829333333333333,
+      "tomtom": {
+        "validated": true,
+        "flow_type": "relative",
+        "geometry_max_distance_m": 75.0,
+        "selected_road_geometry": [
+          {"road_type": "Major local road", "road_category": "tertiary", "road_subcategory": "major_local", "distance_m": 1.28},
+          {"road_type": "Major local road", "road_category": "tertiary", "road_subcategory": "major_local", "distance_m": 1.28}
+        ]
+      },
+      "selection": {
+        "configured_fra_id": "283556X",
+        "decision": "automatic_substitution",
+        "reason": "McAllister Rd had no usable TomTom flow geometry during local setup"
+      }
+    },
+    {
+      "fra_id": "283572G",
+      "name": "MAIN STREET/M-78",
+      "road_name": "MAIN STREET/M-78",
+      "railroad": "GTW",
+      "subdivision": "FLINT",
+      "milepost": 189.18,
+      "latitude": 42.44231,
+      "longitude": -85.01805,
+      "aadt": 3600,
+      "aadt_year": 1993,
+      "fra_revision_date": "2026-07-23T12:53:47.230000+00:00",
+      "group": "Battle Creek",
+      "role": "primary",
+      "poll_interval_sec": 120,
+      "phase_sec": 0,
+      "tile_zoom": 16,
+      "tile_mapping": {
+        "zoom": 16,
+        "tiles": [
+          {"z": 16, "x": 17290, "y": 24219, "flow_type": "relative"}
+        ],
+        "signatures": [
+          {"road_type": "Connecting road", "road_category": "tertiary", "road_subcategory": "connecting", "distance_m": 1.32},
+          {"road_type": "Connecting road", "road_category": "tertiary", "road_subcategory": "connecting", "distance_m": 1.32}
+        ],
+        "max_distance_m": 75.0,
+        "geometry_score": 0.9824,
+        "validated_at_setup": true
+      },
+      "coverage_score": 0.9824,
+      "tomtom": {
+        "validated": true,
+        "flow_type": "relative",
+        "geometry_max_distance_m": 75.0,
+        "selected_road_geometry": [
+          {"road_type": "Connecting road", "road_category": "tertiary", "road_subcategory": "connecting", "distance_m": 1.32},
+          {"road_type": "Connecting road", "road_category": "tertiary", "road_subcategory": "connecting", "distance_m": 1.32}
+        ]
+      },
+      "selection": {
+        "configured_fra_ids": ["283562B", "283563H"],
+        "decision": "selected_best_live_candidate",
+        "reason": "strong TomTom coverage and highest AADT among usable candidates in the MP 184-190 band"
+      }
+    },
+    {
+      "fra_id": "283706D",
+      "name": "Grand River Rd",
+      "road_name": "GRAND RIVER RD",
+      "railroad": "GTW",
+      "subdivision": "FLINT",
+      "milepost": 248.65,
+      "latitude": 42.87738,
+      "longitude": -84.06195,
+      "aadt": 3356,
+      "aadt_year": 2009,
+      "fra_revision_date": "2026-07-23T12:53:47.230000+00:00",
+      "group": "Durand",
+      "role": "primary",
+      "poll_interval_sec": 120,
+      "phase_sec": 0,
+      "tile_zoom": 16,
+      "tile_mapping": {
+        "zoom": 16,
+        "tiles": [
+          {"z": 16, "x": 17464, "y": 24111, "flow_type": "relative"}
+        ],
+        "signatures": [
+          {"road_type": "Major local road", "road_category": "tertiary", "road_subcategory": "major_local", "distance_m": 2.55},
+          {"road_type": "Major local road", "road_category": "tertiary", "road_subcategory": "major_local", "distance_m": 2.55}
+        ],
+        "max_distance_m": 75.0,
+        "geometry_score": 0.966,
+        "validated_at_setup": true
+      },
+      "coverage_score": 0.966,
+      "tomtom": {
+        "validated": true,
+        "flow_type": "relative",
+        "geometry_max_distance_m": 75.0,
+        "selected_road_geometry": [
+          {"road_type": "Major local road", "road_category": "tertiary", "road_subcategory": "major_local", "distance_m": 2.55},
+          {"road_type": "Major local road", "road_category": "tertiary", "road_subcategory": "major_local", "distance_m": 2.55}
+        ]
+      },
+      "selection": {"configured_fra_id": "283706D", "decision": "selected"}
+    },
+    {
+      "fra_id": "283716J",
+      "name": "Oak Street",
+      "road_name": "OAK ST",
+      "railroad": "GTW",
+      "subdivision": "FLINT",
+      "milepost": 253.03,
+      "latitude": 42.90809,
+      "longitude": -83.98767,
+      "aadt": 3276,
+      "aadt_year": 2019,
+      "fra_revision_date": "2026-07-23T12:53:47.230000+00:00",
+      "group": "Durand",
+      "role": "backup",
+      "poll_interval_sec": 240,
+      "phase_sec": 60,
+      "tile_zoom": 16,
+      "tile_mapping": {
+        "zoom": 16,
+        "tiles": [
+          {"z": 16, "x": 17478, "y": 24104, "flow_type": "relative"}
+        ],
+        "signatures": [
+          {"road_type": "Major local road", "road_category": "tertiary", "road_subcategory": "major_local", "distance_m": 1.31},
+          {"road_type": "Major local road", "road_category": "tertiary", "road_subcategory": "major_local", "distance_m": 1.31}
+        ],
+        "max_distance_m": 75.0,
+        "geometry_score": 0.9825333333333334,
+        "validated_at_setup": true
+      },
+      "coverage_score": 0.9825333333333334,
+      "tomtom": {
+        "validated": true,
+        "flow_type": "relative",
+        "geometry_max_distance_m": 75.0,
+        "selected_road_geometry": [
+          {"road_type": "Major local road", "road_category": "tertiary", "road_subcategory": "major_local", "distance_m": 1.31},
+          {"road_type": "Major local road", "road_category": "tertiary", "road_subcategory": "major_local", "distance_m": 1.31}
+        ]
+      },
+      "selection": {"configured_fra_id": "283716J", "decision": "selected"}
+    },
+    {
+      "fra_id": "283724B",
+      "name": "Byron Rd",
+      "road_name": "BYRON RD",
+      "railroad": "GTW",
+      "subdivision": "FLINT",
+      "milepost": 255.15,
+      "latitude": 42.9189,
+      "longitude": -83.94851,
+      "aadt": 2627,
+      "aadt_year": 2009,
+      "fra_revision_date": "2026-07-23T12:53:47.230000+00:00",
+      "group": "Durand",
+      "role": "backup",
+      "poll_interval_sec": 240,
+      "phase_sec": 180,
+      "tile_zoom": 16,
+      "tile_mapping": {
+        "zoom": 16,
+        "tiles": [
+          {"z": 16, "x": 17485, "y": 24101, "flow_type": "relative"}
+        ],
+        "signatures": [
+          {"road_type": "Major local road", "road_category": "tertiary", "road_subcategory": "major_local", "distance_m": 0.39},
+          {"road_type": "Major local road", "road_category": "tertiary", "road_subcategory": "major_local", "distance_m": 0.39}
+        ],
+        "max_distance_m": 75.0,
+        "geometry_score": 0.9948,
+        "validated_at_setup": true
+      },
+      "coverage_score": 0.9948,
+      "tomtom": {
+        "validated": true,
+        "flow_type": "relative",
+        "geometry_max_distance_m": 75.0,
+        "selected_road_geometry": [
+          {"road_type": "Major local road", "road_category": "tertiary", "road_subcategory": "major_local", "distance_m": 0.39},
+          {"road_type": "Major local road", "road_category": "tertiary", "road_subcategory": "major_local", "distance_m": 0.39}
+        ]
+      },
+      "selection": {
+        "configured_fra_id": "283714V",
+        "decision": "automatic_substitution",
+        "reason": "Pittsburg Rd had no usable TomTom flow geometry during local setup"
+      }
+    },
+    {
+      "fra_id": "283632N",
+      "name": "Creyts Rd",
+      "road_name": "CREYTS RD",
+      "railroad": "GTW",
+      "subdivision": "FLINT",
+      "milepost": 215.41,
+      "latitude": 42.69072,
+      "longitude": -84.64235,
+      "aadt": 10567,
+      "aadt_year": 2006,
+      "fra_revision_date": "2026-07-23T12:53:47.230000+00:00",
+      "group": "Lansing",
+      "role": "primary",
+      "poll_interval_sec": 120,
+      "phase_sec": 0,
+      "tile_zoom": 16,
+      "tile_mapping": {
+        "zoom": 16,
+        "tiles": [
+          {"z": 16, "x": 17359, "y": 24157, "flow_type": "relative"}
+        ],
+        "signatures": [
+          {"road_type": "Connecting road", "road_category": "tertiary", "road_subcategory": "connecting", "distance_m": 1.31},
+          {"road_type": "Connecting road", "road_category": "tertiary", "road_subcategory": "connecting", "distance_m": 1.31}
+        ],
+        "max_distance_m": 75.0,
+        "geometry_score": 0.9825333333333334,
+        "validated_at_setup": true
+      },
+      "coverage_score": 0.9825333333333334,
+      "tomtom": {
+        "validated": true,
+        "flow_type": "relative",
+        "geometry_max_distance_m": 75.0,
+        "selected_road_geometry": [
+          {"road_type": "Connecting road", "road_category": "tertiary", "road_subcategory": "connecting", "distance_m": 1.31},
+          {"road_type": "Connecting road", "road_category": "tertiary", "road_subcategory": "connecting", "distance_m": 1.31}
+        ]
+      },
+      "selection": {"configured_fra_id": "283632N", "decision": "selected"}
+    },
+    {
+      "fra_id": "283634C",
+      "name": "Millett Hwy",
+      "road_name": "MILLETT HWY",
+      "railroad": "GTW",
+      "subdivision": "FLINT",
+      "milepost": 216.19,
+      "latitude": 42.69757,
+      "longitude": -84.63026,
+      "aadt": 3198,
+      "aadt_year": 2005,
+      "fra_revision_date": "2026-07-23T12:53:47.230000+00:00",
+      "group": "Lansing",
+      "role": "backup",
+      "poll_interval_sec": 240,
+      "phase_sec": 60,
+      "tile_zoom": 16,
+      "tile_mapping": {
+        "zoom": 16,
+        "tiles": [
+          {"z": 16, "x": 17361, "y": 24156, "flow_type": "relative"}
+        ],
+        "signatures": [
+          {"road_type": "Connecting road", "road_category": "tertiary", "road_subcategory": "connecting", "distance_m": 58.57},
+          {"road_type": "Connecting road", "road_category": "tertiary", "road_subcategory": "connecting", "distance_m": 73.72}
+        ],
+        "max_distance_m": 75.0,
+        "geometry_score": 0.21906666666666663,
+        "validated_at_setup": true
+      },
+      "coverage_score": 0.21906666666666663,
+      "tomtom": {
+        "validated": true,
+        "flow_type": "relative",
+        "geometry_max_distance_m": 75.0,
+        "selected_road_geometry": [
+          {"road_type": "Connecting road", "road_category": "tertiary", "road_subcategory": "connecting", "distance_m": 58.57},
+          {"road_type": "Connecting road", "road_category": "tertiary", "road_subcategory": "connecting", "distance_m": 73.72}
+        ]
+      },
+      "selection": {"configured_fra_id": "283634C", "decision": "selected_with_low_geometry_margin"}
+    }
+  ],
+  "substitutions": [
+    {
+      "configured_fra_id": "283556X",
+      "configured_name": "McAllister Rd",
+      "selected_fra_id": "283569Y",
+      "selected_name": "SAND ROAD",
+      "reason": "configured crossing had no usable TomTom flow geometry during local setup"
+    },
+    {
+      "configured_fra_id": "283714V",
+      "configured_name": "Pittsburg Rd",
+      "selected_fra_id": "283724B",
+      "selected_name": "BYRON RD",
+      "reason": "configured crossing had no usable TomTom flow geometry during local setup"
+    }
+  ]
+}
