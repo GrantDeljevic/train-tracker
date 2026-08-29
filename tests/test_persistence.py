@@ -5,7 +5,7 @@ from sqlalchemy.orm import sessionmaker
 
 from train_tracker.calibration import calculate_crossing_quality
 from train_tracker.models import Base, Crossing, CrossingEvent, TrainHypothesis, TrafficObservation
-from train_tracker.scheduler import PollScheduler
+from train_tracker.scheduler import PollScheduler, phase_anchor
 from train_tracker.train_tracker import refresh_hypotheses
 from train_tracker.usage import UsageService, usage_month
 
@@ -86,6 +86,7 @@ def test_scheduled_runtime_snapshot_restores_polling_context():
 
     scheduler = PollScheduler(object(), session_factory=factory, initial_poll_all=True)
     scheduler.restore_runtime_state({
+        "version": 2,
         "last_polled": {"1": "2026-01-01T06:58:00+00:00"},
         "burst_until": {"Battle Creek": "2026-01-01T07:18:00+00:00"},
         "last_run": "2026-01-01T06:58:00+00:00",
@@ -107,6 +108,54 @@ def test_scheduled_runtime_snapshot_restores_polling_context():
     with factory() as session:
         assert session.scalar(select(TrafficObservation).where(TrafficObservation.crossing_id == 1)) is not None
         assert session.get(CrossingEvent, 10) is not None
+
+
+def test_serverless_bootstrap_seeds_relative_cadence_from_phases():
+    factory = _db()
+    now = datetime.fromtimestamp(1_700_000_005, timezone.utc)
+    crossings = [
+        _crossing(1, group="Battle Creek", milepost=181.16),
+        _crossing(2, group="Lansing", milepost=215.41),
+        _crossing(3, group="Durand", milepost=248.65),
+    ]
+    for crossing in crossings:
+        crossing.role = "primary"
+        crossing.poll_interval_sec = 120
+    with factory() as session:
+        session.add_all(crossings)
+        session.commit()
+
+    scheduler = PollScheduler(object(), session_factory=factory, initial_poll_all=True)
+    polled = []
+    scheduler.poll_crossing = lambda crossing_id, now=None: polled.append(crossing_id) or True
+    scheduler._save_system_state = lambda *args: None
+
+    assert scheduler.poll_due(now) == 3
+    assert polled == [1, 2, 3]
+    assert scheduler.last_polled == {crossing.id: phase_anchor(crossing, now) for crossing in crossings}
+
+
+def test_legacy_runtime_snapshot_is_reanchored_to_crossing_phase():
+    factory = _db()
+    with factory() as session:
+        session.add_all([
+            _crossing(1, group="Battle Creek", milepost=181.16),
+            _crossing(2, group="Lansing", milepost=215.41),
+            _crossing(3, group="Durand", milepost=248.65),
+        ])
+        session.commit()
+
+    scheduler = PollScheduler(object(), session_factory=factory)
+    scheduler.restore_runtime_state({
+        "version": 1,
+        "last_polled": {
+            "1": "2026-01-01T07:00:00+00:00",
+            "2": "2026-01-01T07:00:00+00:00",
+            "3": "2026-01-01T07:00:00+00:00",
+        },
+    })
+
+    assert len(set(scheduler.last_polled.values())) == 3
 
 
 def test_runtime_snapshot_carries_the_monotonic_usage_checkpoint():

@@ -22,6 +22,7 @@ from .usage import UsageService, usage_month
 LOGGER = logging.getLogger(__name__)
 
 GROUP_OFFSETS = {"Battle Creek": 0, "Lansing": 20, "Durand": 40}
+SCHEDULE_STATE_VERSION = 2
 
 
 def interval_for(crossing: Crossing, burst: bool = False, projected: int | None = None) -> int:
@@ -32,6 +33,21 @@ def interval_for(crossing: Crossing, burst: bool = False, projected: int | None 
     if projected is not None and projected >= settings.soft_request_budget:
         return 360 if projected >= settings.monthly_request_budget else 300
     return 240
+
+
+def phase_anchor(crossing: Crossing, now: datetime, burst: bool = False, projected: int | None = None) -> datetime:
+    """Return the most recent scheduled slot for a crossing.
+
+    Polls may happen a few seconds after a slot because the process or the
+    invoking scheduler has jitter. Keeping this slot, rather than the actual
+    catch-up time, as the cadence anchor prevents a bootstrap poll from
+    synchronizing otherwise staggered crossings.
+    """
+    interval = interval_for(crossing, burst, projected)
+    phase = (GROUP_OFFSETS.get(crossing.group_name, 0) + crossing.phase_sec) % interval
+    epoch = now.timestamp()
+    anchor = epoch - ((epoch - phase) % interval)
+    return datetime.fromtimestamp(anchor, timezone.utc)
 
 
 def due_crossings(crossings, now: datetime, last_polled: dict[int, datetime], burst_groups: set[str] | None = None, projected: int | None = None):
@@ -93,6 +109,20 @@ class PollScheduler:
                 for group, value in (state.get("burst_until") or {}).items()
                 if (parsed := self._parse_time(value)) is not None
             }
+            if int(state.get("version") or 1) < SCHEDULE_STATE_VERSION:
+                # Version 1 bootstrapped every crossing at one timestamp in
+                # serverless mode. Re-anchor that legacy snapshot to the
+                # configured phases once, without changing observations.
+                burst_groups = self._burst_groups(utc_now())
+                self.last_polled = {
+                    crossing_id: phase_anchor(
+                        crossing,
+                        moment,
+                        burst=crossing.group_name in burst_groups,
+                    )
+                    for crossing_id, moment in self.last_polled.items()
+                    if (crossing := next((item for item in crossings.values() if item.id == crossing_id), None)) is not None
+                }
             self.last_run = self._parse_time(state.get("last_run"))
             self.last_error = state.get("last_error") or None
             restored_usage = state.get("usage")
@@ -203,7 +233,7 @@ class PollScheduler:
                     "created_at": item.created_at.isoformat() if item.created_at else None,
                 })
         return {
-            "version": 1,
+            "version": SCHEDULE_STATE_VERSION,
             "last_polled": {crossings[crossing_id].fra_id: moment.isoformat() for crossing_id, moment in self.last_polled.items() if crossing_id in crossings},
             "burst_until": {group: moment.isoformat() for group, moment in self.burst_until.items() if moment > now},
             "last_run": self.last_run.isoformat() if self.last_run else None,
@@ -449,16 +479,23 @@ class PollScheduler:
         with self.session_factory() as session:
             crossings = list(session.scalars(select(Crossing).where(Crossing.enabled.is_(True))).all())
             projected = self.usage.projected_monthly_requests(session)
-        if self.initial_poll_all and not self.last_polled and self.last_run is None:
+        burst_groups = self._burst_groups(now)
+        bootstrap = self.initial_poll_all and not self.last_polled and self.last_run is None
+        if bootstrap:
             due = crossings
         else:
-            due = due_crossings(crossings, now, self.last_polled, self._burst_groups(now), projected)
+            due = due_crossings(crossings, now, self.last_polled, burst_groups, projected)
         count = 0
         cycle_failed = False
         for crossing in due:
+            was_unseeded = crossing.id not in self.last_polled
             if not self.poll_crossing(crossing.id, now):
                 cycle_failed = True
-            self.last_polled[crossing.id] = now
+            self.last_polled[crossing.id] = (
+                phase_anchor(crossing, now, burst=crossing.group_name in burst_groups, projected=projected)
+                if was_unseeded
+                else now
+            )
             count += 1
         if due and not cycle_failed:
             self.last_error = None
