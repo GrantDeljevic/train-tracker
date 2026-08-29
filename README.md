@@ -75,12 +75,16 @@ continuous mode. No Heroku Postgres add-on or release migration is required.
 For Cloud Run, deploy the same web service in scheduled mode and create one
 Cloud Scheduler job; no permanently running local machine is needed. Use the
 existing Google service-account infrastructure for durable Sheets history.
+Cloud Run's public frontend reserves the exact `/healthz` path, so use
+`GET /health` for the production health check; `/healthz` remains available
+for local/non-Cloud-Run deployments.
 
 The repository includes `cloudbuild.yaml` for automatic deployment. A Cloud
 Build trigger watching `main` builds and pushes a commit-tagged container image,
 then updates the existing `charlotte-freight-warning` Cloud Run service. The
 deploy step intentionally changes only the image, so the service's existing
 environment variables, scheduler endpoint, scaling, and authentication remain
-managed in Cloud Run. The trigger should use the repository's default Cloud
-Build service account with permission to deploy this service and act as its
-runtime service account.
+managed in Cloud Run. The trigger should use a dedicated deployer service
+account with Cloud Run Admin, Artifact Registry Writer, and narrowly scoped
+Service Account User permissions for the service's runtime identity, plus Logs
+Writer for Cloud Build logging.

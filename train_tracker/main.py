@@ -276,6 +276,11 @@ def api_usage() -> dict:
     return UsageService(SessionLocal).snapshot()
 
 
+# Cloud Run's public frontend reserves the exact /healthz path and returns a
+# Google-generated 404 before the request reaches the container. Keep the
+# conventional route for local/non-Cloud-Run deployments and expose /health
+# for the production readiness check.
+@app.get("/health")
 @app.get("/healthz")
 def healthz() -> dict:
     try:
