@@ -54,6 +54,7 @@ class Settings:
     sheets_spreadsheet_id: str | None
     sheets_service_account_file: str | None
     sheets_service_account_json: str | None
+    sheets_service_account_json_b64: str | None
     sheets_batch_seconds: int
     sheets_batch_rows: int
     sheets_rotation: str
@@ -85,6 +86,7 @@ def load_settings() -> Settings:
         sheets_spreadsheet_id=os.getenv("TRAIN_TRACKER_SHEET_ID") or os.getenv("GOOGLE_SHEET_ID") or None,
         sheets_service_account_file=os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE") or None,
         sheets_service_account_json=os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON") or None,
+        sheets_service_account_json_b64=os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON_B64") or None,
         sheets_batch_seconds=_int("GOOGLE_SHEETS_BATCH_SECONDS", 180),
         sheets_batch_rows=_int("GOOGLE_SHEETS_BATCH_ROWS", 100),
         sheets_rotation=os.getenv("GOOGLE_SHEETS_ROTATION", "monthly").strip().lower(),

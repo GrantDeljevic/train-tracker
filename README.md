@@ -43,7 +43,9 @@ account pattern. Set `TRAIN_TRACKER_SHEET_ID` and either
 creates/uses append-only tabs for traffic observations, crossing events, train
 hypotheses, calibration, API usage, and an archive index. Monthly rotation uses
 the archive index to create a new period spreadsheet without putting a
-credential in the repository.
+credential in the repository. `GOOGLE_SERVICE_ACCOUNT_JSON_B64` is also
+supported for Heroku CLI/config transport when raw JSON shell quoting is
+undesirable.
 
 ## Tests
 

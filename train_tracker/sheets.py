@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import base64
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -107,6 +108,11 @@ class GoogleSheetsArchive:
             raise SheetsError("pygsheets is required for Google Sheets persistence") from error
 
         service_json = self.settings.sheets_service_account_json
+        if not service_json and self.settings.sheets_service_account_json_b64:
+            try:
+                service_json = base64.b64decode(self.settings.sheets_service_account_json_b64).decode("utf-8")
+            except (ValueError, UnicodeDecodeError) as error:
+                raise SheetsError("GOOGLE_SERVICE_ACCOUNT_JSON_B64 is not valid base64 JSON") from error
         if service_json:
             try:
                 json.loads(service_json)
