@@ -38,6 +38,10 @@ class Settings:
     soft_request_budget: int
     fra_refresh_days: int
     enable_poller: bool
+    serverless_polling: bool
+    poll_trigger_token: str | None
+    poll_trigger_audience: str | None
+    poll_trigger_service_account_email: str | None
     auto_create_schema: bool
     host: str
     port: int
@@ -70,6 +74,10 @@ def load_settings() -> Settings:
         soft_request_budget=_int("TOMTOM_SOFT_REQUEST_BUDGET", 175_000),
         fra_refresh_days=_int("FRA_REFRESH_DAYS", 7),
         enable_poller=_bool("ENABLE_POLLER", True),
+        serverless_polling=_bool("SERVERLESS_POLLING", False),
+        poll_trigger_token=os.getenv("POLL_TRIGGER_TOKEN") or None,
+        poll_trigger_audience=os.getenv("POLL_TRIGGER_AUDIENCE") or None,
+        poll_trigger_service_account_email=os.getenv("POLL_TRIGGER_SERVICE_ACCOUNT_EMAIL") or None,
         auto_create_schema=_bool("AUTO_CREATE_SCHEMA", True),
         host=os.getenv("HOST", "0.0.0.0"),
         port=_int("PORT", 8000),

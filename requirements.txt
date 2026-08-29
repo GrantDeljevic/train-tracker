@@ -2,6 +2,7 @@ fastapi>=0.115,<1
 uvicorn[standard]>=0.34,<1
 SQLAlchemy>=2.0,<3
 pygsheets>=2.0,<3
+google-auth>=2.35,<3
 httpx>=0.28,<1
 mapbox-vector-tile>=2.1,<3
 mercantile>=1.2,<2

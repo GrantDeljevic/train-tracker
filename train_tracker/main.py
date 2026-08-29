@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import hmac
 import logging
 import math
 from datetime import datetime, timedelta, timezone
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
 from sqlalchemy import desc, select
 
@@ -27,6 +28,7 @@ poll_scheduler: PollScheduler | None = None
 poll_task: asyncio.Task | None = None
 tomtom_client: TomTomClient | None = None
 sheets_archive: GoogleSheetsArchive | None = None
+poll_request_lock = asyncio.Lock()
 
 
 def _aware(value: datetime | None) -> datetime | None:
@@ -45,6 +47,32 @@ def _minutes_until(value: datetime | None, now: datetime) -> int | None:
     return max(0, math.ceil((_aware(value) - now).total_seconds() / 60))
 
 
+def _valid_poll_trigger(request: Request) -> bool:
+    expected_token = settings.poll_trigger_token
+    if expected_token:
+        supplied = request.headers.get("x-train-tracker-token", "")
+        return hmac.compare_digest(supplied, expected_token)
+
+    audience = settings.poll_trigger_audience
+    expected_email = settings.poll_trigger_service_account_email
+    authorization = request.headers.get("authorization", "")
+    if not audience or not expected_email or not authorization.lower().startswith("bearer "):
+        return False
+    try:
+        from google.auth.transport import requests as google_requests
+        from google.oauth2 import id_token
+
+        claims = id_token.verify_oauth2_token(
+            authorization.split(" ", 1)[1],
+            google_requests.Request(),
+            audience=audience,
+        )
+        return claims.get("email") == expected_email
+    except Exception:
+        LOGGER.warning("Cloud Scheduler OIDC validation failed", exc_info=True)
+        return False
+
+
 @app.on_event("startup")
 async def startup() -> None:
     init_db()
@@ -58,14 +86,24 @@ async def startup() -> None:
     if restored_usage:
         usage.restore(usage_month(), restored_usage)
         LOGGER.info("restored TomTom usage checkpoint for %s", usage_month())
-    if settings.enable_poller:
+    if settings.enable_poller or settings.serverless_polling:
         tomtom_client = TomTomClient(
             usage_callback=usage.record,
             request_guard=usage.allowed,
         )
-        poll_scheduler = PollScheduler(tomtom_client, usage_service=usage, archive=sheets_archive)
-        poll_task = asyncio.create_task(poll_scheduler.run_forever())
-        LOGGER.info("poller started with one in-process scheduler")
+        poll_scheduler = PollScheduler(
+            tomtom_client,
+            usage_service=usage,
+            archive=sheets_archive,
+            initial_poll_all=settings.serverless_polling,
+        )
+        if sheets_archive.connected:
+            poll_scheduler.restore_runtime_state(sheets_archive.load_runtime_state())
+        if settings.serverless_polling:
+            LOGGER.info("poller configured for one-shot Cloud Run invocations")
+        else:
+            poll_task = asyncio.create_task(poll_scheduler.run_forever())
+            LOGGER.info("poller started with one in-process scheduler")
     else:
         LOGGER.info("poller disabled by ENABLE_POLLER")
 
@@ -122,6 +160,29 @@ def _hypothesis_payload(session, row: TrainHypothesis, now: datetime) -> dict:
     }
 
 
+@app.post("/internal/poll")
+async def internal_poll(request: Request) -> dict:
+    """Run one scheduled polling cycle for Cloud Scheduler."""
+    if not settings.serverless_polling:
+        raise HTTPException(status_code=404, detail="scheduled polling is disabled")
+    if not settings.poll_trigger_token and not (settings.poll_trigger_audience and settings.poll_trigger_service_account_email):
+        raise HTTPException(status_code=503, detail="poll trigger authentication is not configured")
+    if not _valid_poll_trigger(request):
+        raise HTTPException(status_code=401, detail="invalid poll trigger token")
+    if poll_scheduler is None:
+        raise HTTPException(status_code=503, detail="poller is not initialized")
+    async with poll_request_lock:
+        count = await asyncio.to_thread(poll_scheduler.poll_due)
+        flushed = await asyncio.to_thread(poll_scheduler.flush_archive_if_due, force=True)
+        return {
+            "ok": True,
+            "polled_crossings": count,
+            "archive_flushed": flushed,
+            "last_run": _iso(poll_scheduler.last_run),
+            "last_error": poll_scheduler.last_error,
+        }
+
+
 @app.get("/api/status")
 def api_status() -> dict:
     now = utc_now()
@@ -139,7 +200,7 @@ def api_status() -> dict:
             data_degraded = any(not value["fresh"] for value in valid_groups.values()) if crossings else True
             if historical_health.get("required") and not historical_health.get("connected"):
                 data_degraded = True
-            provider_error = (settings.enable_poller and not settings.tomtom_api_key) or any((latest := _latest_observation(session, crossing.id)) is not None and latest.status == "ERROR" for crossing in crossings)
+            provider_error = ((settings.enable_poller or settings.serverless_polling) and not settings.tomtom_api_key) or any((latest := _latest_observation(session, crossing.id)) is not None and latest.status == "ERROR" for crossing in crossings)
             if provider_error:
                 state = "DATA DEGRADED"
             elif active:
@@ -172,6 +233,7 @@ def api_status() -> dict:
                 "hypotheses": hypotheses,
                 "system": {
                     "poller_enabled": settings.enable_poller,
+                    "poller_mode": "scheduled" if settings.serverless_polling else "continuous",
                     "poller_last_run": (health.value_json or {}).get("last_run") if health else None,
                     "poller_error": (health.value_json or {}).get("last_error") if health else None,
                     "api_key_configured": bool(settings.tomtom_api_key),
@@ -221,7 +283,13 @@ def healthz() -> dict:
             session.execute(select(1)).scalar_one()
         historical = sheets_archive.health() if sheets_archive else {"configured": False, "required": False, "connected": False}
         ok = not historical.get("required") or historical.get("connected")
-        response = {"ok": ok, "runtime_state": "memory", "historical_persistence": historical, "poller": "running" if settings.enable_poller else "disabled", "time": _iso(utc_now())}
+        response = {
+            "ok": ok,
+            "runtime_state": "sheets-snapshot" if settings.serverless_polling else "memory",
+            "historical_persistence": historical,
+            "poller": "scheduled" if settings.serverless_polling else ("running" if settings.enable_poller else "disabled"),
+            "time": _iso(utc_now()),
+        }
         if not ok:
             raise HTTPException(status_code=503, detail=response)
         return response

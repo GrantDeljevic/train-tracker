@@ -1,0 +1,17 @@
+.git/
+.venv/
+.pytest_cache/
+__pycache__/
+*.py[cod]
+*.db
+*.sqlite
+tests/
+.env
+.env.*
+!.env.example
+client_secret.json
+service-account*.json
+google-service-account*.json
+dist/
+build/
+logs/

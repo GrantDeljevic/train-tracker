@@ -2,9 +2,10 @@
 
 An always-on FastAPI service that uses FRA grade-crossing metadata and TomTom
 traffic-flow vector tiles to watch eight railroad sentinels around Charlotte,
-Michigan. Validated crossing setup is checked into the repository. Current
-runtime state is process-local and historical observations, events, hypotheses,
-calibration, and usage checkpoints are appended to Google Sheets.
+Michigan. Validated crossing setup is checked into the repository. In
+continuous mode current state is process-local; in Cloud Run scheduled mode a
+small runtime snapshot is kept in Google Sheets. Historical observations,
+events, hypotheses, calibration, and usage checkpoints are appended to Sheets.
 
 ## Quick start
 
@@ -19,8 +20,11 @@ uvicorn train_tracker.main:app --reload
 ```
 
 Open `http://127.0.0.1:8000/`. The poller runs inside the web process when
-`ENABLE_POLLER=1`; production must use exactly one web worker, or a separate
-worker process.
+`ENABLE_POLLER=1` and `SERVERLESS_POLLING=0`; production must use exactly one
+web worker in that mode. For Cloud Run, set `SERVERLESS_POLLING=1` and have
+Cloud Scheduler call the authenticated `POST /internal/poll` endpoint once per
+minute. The service restores recent observations/events and scheduling state
+from the non-historical `Runtime State` Sheet tab after a cold start.
 
 ## Configuration
 
@@ -41,7 +45,8 @@ Google Sheets persistence follows the existing Curious Bot `pygsheets` service
 account pattern. Set `TRAIN_TRACKER_SHEET_ID` and either
 `GOOGLE_SERVICE_ACCOUNT_JSON` or `GOOGLE_SERVICE_ACCOUNT_FILE`. The service
 creates/uses append-only tabs for traffic observations, crossing events, train
-hypotheses, calibration, API usage, and an archive index. Monthly rotation uses
+hypotheses, calibration, API usage, and an archive index, plus a small
+overwritten `Runtime State` tab for scheduled-runtime recovery. Monthly rotation uses
 the archive index to create a new period spreadsheet without putting a
 credential in the repository. `GOOGLE_SERVICE_ACCOUNT_JSON_B64` is also
 supported for Heroku CLI/config transport when raw JSON shell quoting is
@@ -58,8 +63,8 @@ responses; they do not need a TomTom key or Google credentials.
 
 ## Deployment
 
-The `Procfile` uses one web process for FastAPI plus the background poller. No
-Heroku Postgres add-on or release migration is required. Use the existing Google
-service-account infrastructure for durable Sheets history. The dyno must still
-remain available for the poller; deployment is intentionally a final step after
-local and live validation.
+The `Procfile` uses one web process for FastAPI plus the background poller in
+continuous mode. No Heroku Postgres add-on or release migration is required.
+For Cloud Run, deploy the same web service in scheduled mode and create one
+Cloud Scheduler job; no permanently running local machine is needed. Use the
+existing Google service-account infrastructure for durable Sheets history.

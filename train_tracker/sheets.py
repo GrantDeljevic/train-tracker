@@ -18,6 +18,7 @@ HYPOTHESIS_TAB = "Train Hypotheses"
 CALIBRATION_TAB = "Calibration"
 USAGE_TAB = "API Usage"
 INDEX_TAB = "Archive Index"
+RUNTIME_TAB = "Runtime State"
 
 TAB_HEADERS: dict[str, list[str]] = {
     OBSERVATION_TAB: [
@@ -46,6 +47,7 @@ TAB_HEADERS: dict[str, list[str]] = {
     ],
 }
 INDEX_HEADERS = ["period", "spreadsheet_id", "title", "created_at"]
+RUNTIME_HEADERS = ["updated_at", "state_json"]
 
 
 class SheetsError(RuntimeError):
@@ -161,6 +163,7 @@ class GoogleSheetsArchive:
             title: self._worksheet(spreadsheet, title, headers, pygsheets)
             for title, headers in TAB_HEADERS.items()
         }
+        self._worksheets[RUNTIME_TAB] = self._worksheet(spreadsheet, RUNTIME_TAB, RUNTIME_HEADERS, pygsheets)
 
     def _index_worksheet(self) -> Any:
         try:
@@ -332,6 +335,37 @@ class GoogleSheetsArchive:
                 self.last_error = str(error)[:500]
                 LOGGER.exception("Unable to restore TomTom usage from Sheets: %s", error)
         return None
+
+    def load_runtime_state(self) -> dict[str, Any] | None:
+        """Read the latest small state snapshot used by scheduled runtimes."""
+        with self._lock:
+            if not self.connected:
+                return None
+            try:
+                worksheet = self._worksheets[RUNTIME_TAB]
+                values = worksheet.get_all_values(include_tailing_empty_rows=False, include_tailing_empty=False, returnas="matrix")
+                if len(values) < 2 or len(values[-1]) < 2 or not values[-1][1]:
+                    return None
+                state = json.loads(values[-1][1])
+                return state if isinstance(state, dict) else None
+            except Exception as error:
+                self.last_error = str(error)[:500]
+                LOGGER.exception("Unable to restore runtime state from Sheets: %s", error)
+                return None
+
+    def save_runtime_state(self, state: Mapping[str, Any], recorded_at: datetime | None = None) -> bool:
+        """Overwrite the latest runtime snapshot; this tab is intentionally not append-only."""
+        with self._lock:
+            if not self.connected:
+                return False
+            try:
+                worksheet = self._worksheets[RUNTIME_TAB]
+                worksheet.update_values("A2", [[_iso(recorded_at or datetime.now(timezone.utc)), _json(state)]])
+                return True
+            except Exception as error:
+                self.last_error = str(error)[:500]
+                LOGGER.exception("Unable to save runtime state to Sheets: %s", error)
+                return False
 
     def should_flush(self, now: datetime | None = None) -> bool:
         now = now or datetime.now(timezone.utc)

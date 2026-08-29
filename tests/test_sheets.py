@@ -3,7 +3,7 @@ from dataclasses import replace
 from types import SimpleNamespace
 
 from train_tracker.config import settings
-from train_tracker.sheets import OBSERVATION_TAB, USAGE_TAB, GoogleSheetsArchive
+from train_tracker.sheets import OBSERVATION_TAB, RUNTIME_TAB, USAGE_TAB, GoogleSheetsArchive
 
 
 class WorksheetNotFound(Exception):
@@ -118,3 +118,12 @@ def test_sheets_archive_creates_tabs_batches_rows_and_restores_usage(monkeypatch
     }
 
     assert USAGE_TAB in client.spreadsheets["base"].tabs
+
+    runtime_state = {
+        "version": 1,
+        "last_polled": {"283559T": "2026-08-29T12:00:00+00:00"},
+        "burst_until": {"Battle Creek": "2026-08-29T12:20:00+00:00"},
+    }
+    assert archive.save_runtime_state(runtime_state) is True
+    assert archive.load_runtime_state() == runtime_state
+    assert RUNTIME_TAB in client.spreadsheets["base"].tabs

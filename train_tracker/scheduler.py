@@ -58,16 +58,164 @@ def due_crossings(crossings, now: datetime, last_polled: dict[int, datetime], bu
 
 
 class PollScheduler:
-    def __init__(self, tomtom_client, session_factory=SessionLocal, usage_service: UsageService | None = None, archive: GoogleSheetsArchive | None = None):
+    def __init__(self, tomtom_client, session_factory=SessionLocal, usage_service: UsageService | None = None, archive: GoogleSheetsArchive | None = None, initial_poll_all: bool = False):
         self.tomtom = tomtom_client
         self.session_factory = session_factory
         self.usage = usage_service or UsageService(session_factory)
         self.archive = archive
+        self.initial_poll_all = initial_poll_all
         self.last_polled: dict[int, datetime] = {}
         self.burst_until: dict[str, datetime] = {}
         self.last_run: datetime | None = None
         self.last_error: str | None = None
         self.stop_event = asyncio.Event()
+
+    @staticmethod
+    def _parse_time(value):
+        if not value:
+            return None
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+    def restore_runtime_state(self, state: dict | None) -> None:
+        """Restore the small state needed when a scheduled instance is cold-started."""
+        if not state:
+            return
+        with self.session_factory() as session:
+            crossings = {crossing.fra_id: crossing for crossing in session.scalars(select(Crossing)).all()}
+            for fra_id, value in (state.get("last_polled") or {}).items():
+                crossing = crossings.get(fra_id)
+                parsed = self._parse_time(value)
+                if crossing and parsed:
+                    self.last_polled[crossing.id] = parsed
+            self.burst_until = {
+                str(group): parsed
+                for group, value in (state.get("burst_until") or {}).items()
+                if (parsed := self._parse_time(value)) is not None
+            }
+            self.last_run = self._parse_time(state.get("last_run"))
+            self.last_error = state.get("last_error") or None
+
+            for item in state.get("observations") or []:
+                crossing = crossings.get(item.get("fra_id"))
+                observed_at = self._parse_time(item.get("observed_at"))
+                if not crossing or not observed_at:
+                    continue
+                exists = session.scalar(
+                    select(TrafficObservation).where(
+                        TrafficObservation.crossing_id == crossing.id,
+                        TrafficObservation.observed_at == observed_at,
+                    ).limit(1)
+                )
+                if exists:
+                    continue
+                session.add(TrafficObservation(
+                    crossing_id=crossing.id,
+                    observed_at=observed_at,
+                    tile_fetched_at=self._parse_time(item.get("tile_fetched_at")),
+                    traffic_level_min=item.get("traffic_level_min"),
+                    traffic_level_median=item.get("traffic_level_median"),
+                    directional_values=item.get("directional_values"),
+                    road_coverage=item.get("road_coverage"),
+                    road_closure=item.get("road_closure"),
+                    feature_count=int(item.get("feature_count") or 0),
+                    usable=bool(item.get("usable")),
+                    severity=item.get("severity") or "UNKNOWN",
+                    anomaly_drop=item.get("anomaly_drop"),
+                    anomaly_score=item.get("anomaly_score"),
+                    status=item.get("status"),
+                    error_detail=item.get("error_detail"),
+                    tile_key=item.get("tile_key"),
+                ))
+
+            for item in state.get("events") or []:
+                crossing = crossings.get(item.get("fra_id"))
+                event_time = self._parse_time(item.get("event_time_estimate"))
+                if not crossing or not event_time:
+                    continue
+                event_id = item.get("id")
+                exists = session.get(CrossingEvent, int(event_id)) if event_id not in (None, "") else None
+                if exists:
+                    continue
+                session.add(CrossingEvent(
+                    id=int(event_id) if event_id not in (None, "") else None,
+                    crossing_id=crossing.id,
+                    event_time_estimate=event_time,
+                    event_time_low=self._parse_time(item.get("event_time_low")),
+                    event_time_high=self._parse_time(item.get("event_time_high")),
+                    severity=item.get("severity") or "UNKNOWN",
+                    evidence_json=item.get("evidence_json") or {},
+                    created_at=self._parse_time(item.get("created_at")) or event_time,
+                ))
+            session.commit()
+        self.initial_poll_all = False
+
+    def _runtime_state(self, now: datetime) -> dict:
+        with self.session_factory() as session:
+            crossings = {crossing.id: crossing for crossing in session.scalars(select(Crossing)).all()}
+            observations = list(session.scalars(select(TrafficObservation).order_by(TrafficObservation.observed_at.desc()).limit(200)).all())
+            per_crossing: dict[int, int] = {}
+            recent_observations = []
+            for item in observations:
+                per_crossing[item.crossing_id] = per_crossing.get(item.crossing_id, 0)
+                if per_crossing[item.crossing_id] >= 20:
+                    continue
+                per_crossing[item.crossing_id] += 1
+                crossing = crossings.get(item.crossing_id)
+                if not crossing:
+                    continue
+                recent_observations.append({
+                    "fra_id": crossing.fra_id,
+                    "observed_at": item.observed_at.isoformat(),
+                    "tile_fetched_at": item.tile_fetched_at.isoformat() if item.tile_fetched_at else None,
+                    "traffic_level_min": item.traffic_level_min,
+                    "traffic_level_median": item.traffic_level_median,
+                    "directional_values": item.directional_values,
+                    "road_coverage": item.road_coverage,
+                    "road_closure": item.road_closure,
+                    "feature_count": item.feature_count,
+                    "usable": item.usable,
+                    "severity": item.severity,
+                    "anomaly_drop": item.anomaly_drop,
+                    "anomaly_score": item.anomaly_score,
+                    "status": item.status,
+                    "error_detail": item.error_detail,
+                    "tile_key": item.tile_key,
+                })
+            cutoff = now - timedelta(hours=6)
+            events = session.scalars(select(CrossingEvent).where(CrossingEvent.event_time_estimate >= cutoff).order_by(CrossingEvent.event_time_estimate)).all()
+            recent_events = []
+            for item in events:
+                crossing = crossings.get(item.crossing_id)
+                if not crossing:
+                    continue
+                recent_events.append({
+                    "id": item.id,
+                    "fra_id": crossing.fra_id,
+                    "event_time_estimate": item.event_time_estimate.isoformat(),
+                    "event_time_low": item.event_time_low.isoformat() if item.event_time_low else None,
+                    "event_time_high": item.event_time_high.isoformat() if item.event_time_high else None,
+                    "severity": item.severity,
+                    "evidence_json": item.evidence_json,
+                    "created_at": item.created_at.isoformat() if item.created_at else None,
+                })
+        return {
+            "version": 1,
+            "last_polled": {crossings[crossing_id].fra_id: moment.isoformat() for crossing_id, moment in self.last_polled.items() if crossing_id in crossings},
+            "burst_until": {group: moment.isoformat() for group, moment in self.burst_until.items() if moment > now},
+            "last_run": self.last_run.isoformat() if self.last_run else None,
+            "last_error": self.last_error,
+            "observations": recent_observations,
+            "events": recent_events,
+        }
+
+    def _save_runtime_state(self, now: datetime) -> None:
+        if self.archive is None or not self.archive.connected:
+            return
+        try:
+            self.archive.save_runtime_state(self._runtime_state(now), recorded_at=now)
+        except Exception as exc:
+            LOGGER.exception("Unable to persist runtime state snapshot: %s", exc)
 
     def _burst_groups(self, now: datetime) -> set[str]:
         return {group for group, until in self.burst_until.items() if until > now}
@@ -297,7 +445,10 @@ class PollScheduler:
         with self.session_factory() as session:
             crossings = list(session.scalars(select(Crossing).where(Crossing.enabled.is_(True))).all())
             projected = self.usage.projected_monthly_requests(session)
-        due = due_crossings(crossings, now, self.last_polled, self._burst_groups(now), projected)
+        if self.initial_poll_all and not self.last_polled and self.last_run is None:
+            due = crossings
+        else:
+            due = due_crossings(crossings, now, self.last_polled, self._burst_groups(now), projected)
         count = 0
         cycle_failed = False
         for crossing in due:
@@ -312,6 +463,7 @@ class PollScheduler:
             self._save_system_state("poller", {"last_run": now.isoformat(), "last_error": self.last_error, "polled": count})
         except Exception as exc:
             LOGGER.exception("Unable to persist poller health: %s", exc)
+        self._save_runtime_state(now)
         self.flush_archive_if_due(now)
         return count
 
