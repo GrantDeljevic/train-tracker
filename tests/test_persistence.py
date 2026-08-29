@@ -156,6 +156,22 @@ def test_legacy_runtime_snapshot_is_reanchored_to_crossing_phase():
     })
 
     assert len(set(scheduler.last_polled.values())) == 3
+    polled = []
+    scheduler.poll_crossing = lambda crossing_id, now=None: polled.append(crossing_id) or True
+    scheduler._save_system_state = lambda *args: None
+    poll_time = datetime(2026, 1, 1, 7, 5, tzinfo=timezone.utc)
+
+    assert scheduler.poll_due(poll_time) == 3
+    assert polled == [1, 2, 3]
+    expected = {
+        crossing.id: phase_anchor(crossing, poll_time)
+        for crossing in (
+            _crossing(1, group="Battle Creek", milepost=181.16),
+            _crossing(2, group="Lansing", milepost=215.41),
+            _crossing(3, group="Durand", milepost=248.65),
+        )
+    }
+    assert scheduler.last_polled == expected
 
 
 def test_runtime_snapshot_carries_the_monotonic_usage_checkpoint():

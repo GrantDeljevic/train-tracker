@@ -44,7 +44,7 @@ def phase_anchor(crossing: Crossing, now: datetime, burst: bool = False, project
     synchronizing otherwise staggered crossings.
     """
     interval = interval_for(crossing, burst, projected)
-    phase = (GROUP_OFFSETS.get(crossing.group_name, 0) + crossing.phase_sec) % interval
+    phase = (GROUP_OFFSETS.get(crossing.group_name, 0) + (crossing.phase_sec or 0)) % interval
     epoch = now.timestamp()
     anchor = epoch - ((epoch - phase) % interval)
     return datetime.fromtimestamp(anchor, timezone.utc)
@@ -488,13 +488,16 @@ class PollScheduler:
         count = 0
         cycle_failed = False
         for crossing in due:
-            was_unseeded = crossing.id not in self.last_polled
             if not self.poll_crossing(crossing.id, now):
                 cycle_failed = True
-            self.last_polled[crossing.id] = (
-                phase_anchor(crossing, now, burst=crossing.group_name in burst_groups, projected=projected)
-                if was_unseeded
-                else now
+            # Keep the configured phase as the cadence anchor even when the
+            # provider or invoking scheduler is a few seconds late. This
+            # also repairs synchronized legacy snapshots on their next poll.
+            self.last_polled[crossing.id] = phase_anchor(
+                crossing,
+                now,
+                burst=crossing.group_name in burst_groups,
+                projected=projected,
             )
             count += 1
         if due and not cycle_failed:
