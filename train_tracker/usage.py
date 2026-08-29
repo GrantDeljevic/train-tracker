@@ -59,7 +59,9 @@ class UsageService:
                 "http_5xx", "network_errors", "cache_dedupe_saves",
             ):
                 if field in values:
-                    setattr(row, field, max(0, int(values[field])))
+                    # A cold-start checkpoint can lag the current instance.
+                    # Never move a monthly usage counter backwards.
+                    setattr(row, field, max(getattr(row, field), 0, int(values[field])))
             row.updated_at = utc_now()
             session.commit()
 

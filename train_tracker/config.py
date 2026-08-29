@@ -61,6 +61,7 @@ class Settings:
     sheets_service_account_json_b64: str | None
     sheets_batch_seconds: int
     sheets_batch_rows: int
+    sheets_max_pending_rows: int
     sheets_rotation: str
     sheets_required: bool
 
@@ -97,6 +98,7 @@ def load_settings() -> Settings:
         sheets_service_account_json_b64=os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON_B64") or None,
         sheets_batch_seconds=_int("GOOGLE_SHEETS_BATCH_SECONDS", 180),
         sheets_batch_rows=_int("GOOGLE_SHEETS_BATCH_ROWS", 100),
+        sheets_max_pending_rows=_int("GOOGLE_SHEETS_MAX_PENDING_ROWS", 10_000),
         sheets_rotation=os.getenv("GOOGLE_SHEETS_ROTATION", "monthly").strip().lower(),
         sheets_required=_bool("GOOGLE_SHEETS_REQUIRED", False),
     )

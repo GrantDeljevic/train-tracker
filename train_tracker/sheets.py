@@ -4,7 +4,7 @@ import json
 import logging
 import base64
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -97,6 +97,9 @@ class GoogleSheetsArchive:
         self._queues: dict[str, list[list[Any]]] = {tab: [] for tab in TAB_HEADERS}
         self._last_usage_signature: tuple[Any, ...] | None = None
         self._hypothesis_signatures: dict[str, tuple[Any, ...]] = {}
+        self._consecutive_flush_failures = 0
+        self._next_retry_at: datetime | None = None
+        self._dropped_rows = 0
         self._lock = threading.RLock()
 
     @property
@@ -138,7 +141,57 @@ class GoogleSheetsArchive:
         return f"{now.year}-{now.month:02d}"
 
     @staticmethod
-    def _worksheet(spreadsheet: Any, title: str, headers: list[str], pygsheets_module: Any) -> Any:
+    def _column_label(column: int) -> str:
+        if column < 1:
+            raise ValueError("column must be positive")
+        labels: list[str] = []
+        while column:
+            column, remainder = divmod(column - 1, 26)
+            labels.append(chr(ord("A") + remainder))
+        return "".join(reversed(labels))
+
+    @classmethod
+    def _write_rows(
+        cls,
+        worksheet: Any,
+        start_row: int,
+        rows: list[list[Any]],
+        expected_cols: int,
+    ) -> None:
+        """Write a rectangular range without pygsheets' single-cell off-by-one.
+
+        pygsheets infers the end cell incorrectly when ``update_values`` is
+        given a single-cell start address.  Supplying the complete range also
+        makes the write safe for existing tabs whose grid has not been grown
+        beyond its original 100 rows.
+        """
+        if not rows:
+            return
+        if expected_cols < 1:
+            raise ValueError("expected_cols must be positive")
+        matrix: list[list[Any]] = []
+        for row in rows:
+            if len(row) > expected_cols:
+                raise SheetsError(
+                    f"row has {len(row)} columns but the worksheet expects {expected_cols}"
+                )
+            matrix.append(list(row) + [""] * (expected_cols - len(row)))
+
+        end_row = start_row + len(matrix) - 1
+        current_rows = int(getattr(worksheet, "rows", 0) or 0)
+        current_cols = int(getattr(worksheet, "cols", 0) or 0)
+        required_rows = max(current_rows, end_row)
+        required_cols = max(current_cols, expected_cols)
+        if required_rows > current_rows or required_cols > current_cols:
+            resize = getattr(worksheet, "resize", None)
+            if resize is not None:
+                resize(rows=required_rows, cols=required_cols)
+
+        end_col = cls._column_label(expected_cols)
+        worksheet.update_values(f"A{start_row}:{end_col}{end_row}", matrix)
+
+    @classmethod
+    def _worksheet(cls, spreadsheet: Any, title: str, headers: list[str], pygsheets_module: Any) -> Any:
         try:
             worksheet = spreadsheet.worksheet_by_title(title)
         except pygsheets_module.WorksheetNotFound:
@@ -149,7 +202,7 @@ class GoogleSheetsArchive:
             returnas="matrix",
         )
         if not values or not any(str(value).strip() for value in values[0]):
-            worksheet.update_values("A1", [headers])
+            cls._write_rows(worksheet, 1, [headers], len(headers))
         elif list(values[0][: len(headers)]) != headers:
             raise SheetsError(f"Google Sheet tab {title!r} has unexpected headers; append stopped")
         return worksheet
@@ -172,8 +225,8 @@ class GoogleSheetsArchive:
             raise SheetsError("pygsheets is required for Google Sheets persistence") from error
         return self._worksheet(self._base_spreadsheet, INDEX_TAB, INDEX_HEADERS, pygsheets)
 
-    @staticmethod
-    def _append_rows(worksheet: Any, rows: list[list[Any]]) -> None:
+    @classmethod
+    def _append_rows(cls, worksheet: Any, rows: list[list[Any]], expected_cols: int) -> None:
         """Append using an explicit next row.
 
         pygsheets' append-table response parser can mis-handle tab names with
@@ -189,7 +242,7 @@ class GoogleSheetsArchive:
             returnas="matrix",
         )
         start_row = len(existing) + 1
-        worksheet.update_values(f"A{start_row}", rows)
+        cls._write_rows(worksheet, start_row, rows, expected_cols)
 
     def _open_period(self, now: datetime) -> None:
         period = self._period(now, self.settings.sheets_rotation)
@@ -203,11 +256,11 @@ class GoogleSheetsArchive:
             title = f"Charlotte Freight Train Warning {period}"
             if not values or len(values) == 1:
                 self._active_spreadsheet = self._base_spreadsheet
-                self._append_rows(index, [[period, base_id, title, _iso(now)]])
+                self._append_rows(index, [[period, base_id, title, _iso(now)]], len(INDEX_HEADERS))
             else:
                 self._active_spreadsheet = self.client.create(title)
                 spreadsheet_id = getattr(self._active_spreadsheet, "id", "")
-                self._append_rows(index, [[period, spreadsheet_id, title, _iso(now)]])
+                self._append_rows(index, [[period, spreadsheet_id, title, _iso(now)]], len(INDEX_HEADERS))
         self._ensure_tabs(self._active_spreadsheet)
         self.last_rotation = period
 
@@ -238,16 +291,34 @@ class GoogleSheetsArchive:
                 "configured": self.configured,
                 "required": self.required,
                 "connected": self.connected,
+                "healthy": self.connected and self.last_error is None and self._dropped_rows == 0,
                 "queued_rows": queued,
+                "dropped_rows": self._dropped_rows,
                 "last_flush_at": _iso(self.last_flush_at) if self.last_flush_at else None,
                 "last_rotation": self.last_rotation,
                 "last_error": self.last_error,
+                "next_retry_at": _iso(self._next_retry_at) if self._next_retry_at else None,
             }
 
     def _enqueue(self, tab: str, row: list[Any]) -> None:
         if not self.connected:
             return
         with self._lock:
+            max_pending = max(1, int(self.settings.sheets_max_pending_rows))
+            queued = sum(len(rows) for rows in self._queues.values())
+            if queued >= max_pending:
+                # Preserve the newest observation/event while bounding memory
+                # during a prolonged Sheets outage.  The loss is explicit in
+                # health/logs; normal operation never reaches this path.
+                oldest_tab = next((name for name, rows in self._queues.items() if rows), None)
+                if oldest_tab is not None:
+                    self._queues[oldest_tab].pop(0)
+                    self._dropped_rows += 1
+                self.last_error = (
+                    f"Google Sheets pending queue reached {max_pending} rows; "
+                    "oldest pending row was dropped"
+                )
+                LOGGER.error("Google Sheets pending queue full; dropping oldest pending row")
             self._queues[tab].append(row)
 
     def enqueue_observation(self, payload: Mapping[str, Any]) -> None:
@@ -360,7 +431,12 @@ class GoogleSheetsArchive:
                 return False
             try:
                 worksheet = self._worksheets[RUNTIME_TAB]
-                worksheet.update_values("A2", [[_iso(recorded_at or datetime.now(timezone.utc)), _json(state)]])
+                self._write_rows(
+                    worksheet,
+                    2,
+                    [[_iso(recorded_at or datetime.now(timezone.utc)), _json(state)]],
+                    len(RUNTIME_HEADERS),
+                )
                 return True
             except Exception as error:
                 self.last_error = str(error)[:500]
@@ -382,26 +458,33 @@ class GoogleSheetsArchive:
         with self._lock:
             if not self.connected:
                 return False
+            if self._next_retry_at and now < self._next_retry_at:
+                return False
             if not force and not self.should_flush(now):
                 return False
-            pending: dict[str, list[list[Any]]] = {}
             try:
                 self._open_period(now)
-                pending = {tab: rows[:] for tab, rows in self._queues.items() if rows}
-                for tab, rows in pending.items():
-                    worksheet = self._worksheets[tab]
-                    for start in range(0, len(rows), 100):
-                        self._append_rows(worksheet, rows[start : start + 100])
-                    # Clear only after the complete tab append succeeds.  A
-                    # later tab failure must not cause already-written rows
-                    # to be replayed on the next retry.
-                    self._queues[tab].clear()
+                for tab, worksheet in self._worksheets.items():
+                    if tab == RUNTIME_TAB:
+                        continue
+                    queue = self._queues[tab]
+                    while queue:
+                        chunk = queue[:100]
+                        self._append_rows(worksheet, chunk, len(TAB_HEADERS[tab]))
+                        # Remove only the chunk whose write returned
+                        # successfully.  A later tab failure cannot replay
+                        # already-written rows, and a mid-tab failure retains
+                        # only the unsent suffix.
+                        del queue[: len(chunk)]
                 self.last_flush_at = now
                 self.last_error = None
+                self._consecutive_flush_failures = 0
+                self._next_retry_at = None
                 return True
             except Exception as error:
-                for tab, rows in pending.items():
-                    self._queues[tab][0:0] = rows
                 self.last_error = str(error)[:500]
+                self._consecutive_flush_failures += 1
+                backoff_seconds = min(300, 10 * (2 ** (self._consecutive_flush_failures - 1)))
+                self._next_retry_at = now + timedelta(seconds=backoff_seconds)
                 LOGGER.exception("Google Sheets batch flush failed: %s", error)
                 return False

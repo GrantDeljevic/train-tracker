@@ -17,7 +17,7 @@ from .sheets import GoogleSheetsArchive
 from .tomtom import RequestBudgetExceeded, TileKey, TomTomError
 from .traffic import TileMapping, observation_from_tiles
 from .train_tracker import refresh_hypotheses
-from .usage import UsageService
+from .usage import UsageService, usage_month
 
 LOGGER = logging.getLogger(__name__)
 
@@ -95,6 +95,9 @@ class PollScheduler:
             }
             self.last_run = self._parse_time(state.get("last_run"))
             self.last_error = state.get("last_error") or None
+            restored_usage = state.get("usage")
+            if isinstance(restored_usage, dict) and restored_usage.get("month") == usage_month():
+                self.usage.restore(usage_month(), restored_usage)
 
             for item in state.get("observations") or []:
                 crossing = crossings.get(item.get("fra_id"))
@@ -205,6 +208,7 @@ class PollScheduler:
             "burst_until": {group: moment.isoformat() for group, moment in self.burst_until.items() if moment > now},
             "last_run": self.last_run.isoformat() if self.last_run else None,
             "last_error": self.last_error,
+            "usage": self.usage.snapshot(),
             "observations": recent_observations,
             "events": recent_events,
         }
@@ -464,7 +468,6 @@ class PollScheduler:
         except Exception as exc:
             LOGGER.exception("Unable to persist poller health: %s", exc)
         self._save_runtime_state(now)
-        self.flush_archive_if_due(now)
         return count
 
     def flush_archive_if_due(self, now: datetime | None = None, force: bool = False) -> bool:

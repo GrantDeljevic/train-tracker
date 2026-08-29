@@ -198,7 +198,7 @@ def api_status() -> dict:
                 valid_groups[group] = {"latest_valid_at": _iso(observation.observed_at) if observation else None, "age_seconds": age, "fresh": age is not None and age <= 10 * 60}
             historical_health = sheets_archive.health() if sheets_archive else {"configured": False, "required": False, "connected": False}
             data_degraded = any(not value["fresh"] for value in valid_groups.values()) if crossings else True
-            if historical_health.get("required") and not historical_health.get("connected"):
+            if historical_health.get("required") and not historical_health.get("healthy", historical_health.get("connected")):
                 data_degraded = True
             provider_error = ((settings.enable_poller or settings.serverless_polling) and not settings.tomtom_api_key) or any((latest := _latest_observation(session, crossing.id)) is not None and latest.status == "ERROR" for crossing in crossings)
             if provider_error:
@@ -281,8 +281,8 @@ def healthz() -> dict:
     try:
         with SessionLocal() as session:
             session.execute(select(1)).scalar_one()
-        historical = sheets_archive.health() if sheets_archive else {"configured": False, "required": False, "connected": False}
-        ok = not historical.get("required") or historical.get("connected")
+        historical = sheets_archive.health() if sheets_archive else {"configured": False, "required": False, "connected": False, "healthy": False}
+        ok = not historical.get("required") or historical.get("healthy", historical.get("connected"))
         response = {
             "ok": ok,
             "runtime_state": "sheets-snapshot" if settings.serverless_polling else "memory",
@@ -315,10 +315,10 @@ const esc=s=>String(s??'—').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>'
 const title=s=>s.replaceAll('_',' ').replace(/\b\w/g,c=>c.toUpperCase());
 function stateClass(s){return s.includes('DEGRADED')?'degraded':s.includes('APPROACHING')?'approach':s.includes('EARLY')||s.includes('POSSIBLE')?'early':'clear'}
 function minutes(h){return h==null?'—':`${h} min`}
-async function refresh(){try{const [s,e,u,c]=await Promise.all([fetch('/api/status'),fetch('/api/events?hours=24'),fetch('/api/usage'),fetch('/api/crossings')]);const status=await s.json(),events=await e.json(),usage=await u.json(),crossings=await c.json();
+async function refresh(){try{const responses=await Promise.all([fetch('/api/status'),fetch('/api/events?hours=24'),fetch('/api/usage'),fetch('/api/crossings')]);if(responses.some(r=>!r.ok))throw new Error('one or more dashboard API requests failed');const [s,e,u,c]=responses;const status=await s.json(),events=await e.json(),usage=await u.json(),crossings=await c.json();
 const st=document.querySelector('#state');st.textContent=esc(status.state);st.className='state '+stateClass(status.state);document.querySelector('#updated').textContent='Updated '+new Date(status.updated_at).toLocaleTimeString();const p=status.hypotheses?.[0];document.querySelector('#details').innerHTML=`<div><div class="label">ETA</div><div class="value">${p?`${minutes(p.eta_low_minutes)}–${minutes(p.eta_high_minutes)}`:'—'}</div></div><div><div class="label">Direction</div><div class="value">${p?esc(title(p.direction)):'—'}</div></div><div><div class="label">Last detected</div><div class="value">${p?esc(p.last_crossing):'—'}</div></div><div><div class="label">Evidence</div><div class="value"><span class="pill">${esc(p?.evidence||status.evidence)}</span></div></div>`;
 document.querySelector('#groups').innerHTML=Object.entries(status.groups).map(([g,v])=>`<div class="group ${v.fresh?'':'stale'}"><div class="label">${esc(g)}</div><div class="value">${v.latest_valid_at?new Date(v.latest_valid_at).toLocaleTimeString():'No valid data'}</div><div class="small">${v.fresh?'Fresh':'Stale / unknown'}</div></div>`).join('');
-document.querySelector('#health').textContent=`Poller: ${status.system.poller_enabled?'enabled':'disabled'} · API key: ${status.system.api_key_configured?'configured':'missing'} · ${status.system.poller_error||'no recent poller error'}`;
+const archive=status.system.historical_persistence;document.querySelector('#health').textContent=`Poller: ${status.system.poller_enabled?'enabled':'disabled'} · API key: ${status.system.api_key_configured?'configured':'missing'} · ${status.system.poller_error||'no recent poller error'}${archive&&!archive.healthy?' · History: degraded':''}`;
 document.querySelector('#events').innerHTML=events.length?'<table><tr><th>Time</th><th>Crossing</th><th>Severity</th></tr>'+events.slice(0,12).map(x=>`<tr><td>${new Date(x.event_time).toLocaleString()}</td><td>${esc(x.crossing)}</td><td>${esc(x.severity)}</td></tr>`).join('')+'</table>':'No crossing events in the last 24 hours.';
 document.querySelector('#usage').innerHTML=`${usage.actual_request_count.toLocaleString()} actual requests this month · ${usage.cache_dedupe_saves.toLocaleString()} cache/dedupe saves · projected normal ${usage.projected_normal_requests.toLocaleString()} / hard ${usage.hard_budget.toLocaleString()}`;
 }catch(err){document.querySelector('#state').textContent='DATA DEGRADED';document.querySelector('#state').className='state degraded';document.querySelector('#health').textContent='Dashboard request failed: '+err}}

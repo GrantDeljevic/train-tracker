@@ -52,6 +52,13 @@ credential in the repository. `GOOGLE_SERVICE_ACCOUNT_JSON_B64` is also
 supported for Heroku CLI/config transport when raw JSON shell quoting is
 undesirable.
 
+The archive writer uses explicit rectangular ranges and grows existing tabs as
+needed. A Sheets outage is reported as unhealthy, retried with bounded backoff,
+and kept in a bounded in-memory queue (`GOOGLE_SHEETS_MAX_PENDING_ROWS`) so a
+provider failure cannot duplicate rows or exhaust the runtime. The runtime
+snapshot also carries the monthly usage checkpoint and restores counters
+monotonically after a Cloud Run cold start.
+
 ## Tests
 
 ```powershell

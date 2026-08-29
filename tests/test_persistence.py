@@ -7,7 +7,7 @@ from train_tracker.calibration import calculate_crossing_quality
 from train_tracker.models import Base, Crossing, CrossingEvent, TrainHypothesis, TrafficObservation
 from train_tracker.scheduler import PollScheduler
 from train_tracker.train_tracker import refresh_hypotheses
-from train_tracker.usage import UsageService
+from train_tracker.usage import UsageService, usage_month
 
 
 def _db():
@@ -64,6 +64,19 @@ def test_monthly_hard_quota_blocks_the_next_request():
     assert usage.snapshot()["actual_request_count"] == 1
 
 
+def test_usage_restore_never_moves_a_counter_backwards():
+    factory = _db()
+    usage = UsageService(factory)
+    usage.record(200, "http")
+    usage.record(200, "http")
+
+    usage.restore("2026-08", {"actual_request_count": 1, "successful_requests": 1})
+
+    snapshot = usage.snapshot()
+    assert snapshot["actual_request_count"] == 2
+    assert snapshot["successful_requests"] == 2
+
+
 def test_scheduled_runtime_snapshot_restores_polling_context():
     factory = _db()
     now = datetime(2026, 1, 1, 7, 0, tzinfo=timezone.utc)
@@ -94,3 +107,15 @@ def test_scheduled_runtime_snapshot_restores_polling_context():
     with factory() as session:
         assert session.scalar(select(TrafficObservation).where(TrafficObservation.crossing_id == 1)) is not None
         assert session.get(CrossingEvent, 10) is not None
+
+
+def test_runtime_snapshot_carries_the_monotonic_usage_checkpoint():
+    factory = _db()
+    usage = UsageService(factory)
+    usage.record(200, "http")
+    scheduler = PollScheduler(object(), session_factory=factory, usage_service=usage)
+
+    state = scheduler._runtime_state(datetime.now(timezone.utc))
+
+    assert state["usage"]["month"] == usage_month()
+    assert state["usage"]["actual_request_count"] == 1
