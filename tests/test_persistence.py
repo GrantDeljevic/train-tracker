@@ -221,7 +221,34 @@ def test_runtime_snapshot_does_not_embed_historical_rows():
     scheduler = PollScheduler(object(), session_factory=factory)
     state = scheduler._runtime_state(now)
 
-    assert state["version"] == 3
+    assert state["version"] == 4
     assert "observations" not in state
     assert "events" not in state
     assert len(json.dumps(state, separators=(",", ":"))) < 45_000
+
+
+def test_runtime_snapshot_carries_compact_detector_context_and_health():
+    factory = _db()
+    with factory() as session:
+        session.add(_crossing(1))
+        session.commit()
+    scheduler = PollScheduler(object(), session_factory=factory)
+    valid_at = datetime(2026, 1, 1, 7, 0, tzinfo=timezone.utc)
+    scheduler.last_valid_by_group["Battle Creek"] = valid_at
+    scheduler.detector_state["1"] = {
+        "previous": 1.0,
+        "baseline": 0.98,
+        "previous_min": 1.0,
+        "baseline_min": 0.99,
+        "previous_directional_values": {"0": {"traffic_level": 1.0, "distance_m": 2.0}},
+        "last_observed_at": valid_at.isoformat(),
+    }
+    state = scheduler._runtime_state(valid_at)
+
+    assert state["last_valid_by_group"]["Battle Creek"] == valid_at.isoformat()
+    assert state["detector_state"]["1"]["previous_min"] == 1.0
+
+    restored = PollScheduler(object(), session_factory=factory)
+    restored.restore_runtime_state(state)
+    assert restored.last_valid_by_group["Battle Creek"] == valid_at
+    assert restored.detector_state["1"]["baseline"] == 0.98

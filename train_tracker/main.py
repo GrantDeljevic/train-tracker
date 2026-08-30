@@ -194,13 +194,16 @@ def api_status() -> dict:
             valid_groups = {}
             for group in ("Battle Creek", "Lansing", "Durand"):
                 observation = latest_valid.get(group)
-                age = (now - _aware(observation.observed_at)).total_seconds() if observation else None
-                valid_groups[group] = {"latest_valid_at": _iso(observation.observed_at) if observation else None, "age_seconds": age, "fresh": age is not None and age <= 10 * 60}
+                local_at = _aware(observation.observed_at) if observation else None
+                runtime_at = poll_scheduler.last_valid_by_group.get(group) if poll_scheduler else None
+                latest_at = max((value for value in (local_at, runtime_at) if value is not None), default=None)
+                age = (now - latest_at).total_seconds() if latest_at else None
+                valid_groups[group] = {"latest_valid_at": _iso(latest_at), "age_seconds": age, "fresh": age is not None and age <= 10 * 60}
             historical_health = sheets_archive.health() if sheets_archive else {"configured": False, "required": False, "connected": False}
             data_degraded = any(not value["fresh"] for value in valid_groups.values()) if crossings else True
             if historical_health.get("required") and not historical_health.get("healthy", historical_health.get("connected")):
                 data_degraded = True
-            provider_error = ((settings.enable_poller or settings.serverless_polling) and not settings.tomtom_api_key) or any((latest := _latest_observation(session, crossing.id)) is not None and latest.status == "ERROR" for crossing in crossings)
+            provider_error = (settings.enable_poller or settings.serverless_polling) and not settings.tomtom_api_key
             if provider_error:
                 state = "DATA DEGRADED"
             elif active:

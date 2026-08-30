@@ -5,7 +5,7 @@ import mercantile
 from shapely.geometry import LineString, mapping
 
 from train_tracker.tomtom import TileKey
-from train_tracker.traffic import decode_flow_tile, road_features_near_crossing
+from train_tracker.traffic import decode_flow_tile, representative_flow_level, road_features_near_crossing
 
 
 def _tile_fixture():
@@ -33,3 +33,11 @@ def test_nearest_crossing_road_extraction():
     assert len(features) == 1
     assert features[0].distance_m < 1
 
+
+def test_representative_flow_uses_two_nearest_directional_features():
+    values = {
+        "0": {"traffic_level": 0.91, "distance_m": 2.0},
+        "1": {"traffic_level": 1.0, "distance_m": 4.0},
+        "2": {"traffic_level": 0.15, "distance_m": 60.0},
+    }
+    assert representative_flow_level(values) == 0.91

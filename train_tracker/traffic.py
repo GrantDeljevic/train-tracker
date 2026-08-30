@@ -4,7 +4,7 @@ import math
 import statistics
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 
 import mapbox_vector_tile
 import mercantile
@@ -180,6 +180,31 @@ def _level(properties: dict[str, Any]) -> float | None:
     return min(1.0, max(0.0, value))
 
 
+def representative_flow_level(directional_values: Mapping[str, Any] | None, limit: int = 2) -> float | None:
+    """Return the minimum level among the nearest directional features."""
+    candidates: list[tuple[float, int, float]] = []
+    for key, value in (directional_values or {}).items():
+        if not isinstance(value, Mapping):
+            continue
+        try:
+            level = float(value.get("traffic_level"))
+        except (TypeError, ValueError):
+            continue
+        try:
+            order = int(key)
+        except (TypeError, ValueError):
+            order = len(candidates)
+        try:
+            distance = float(value.get("distance_m"))
+        except (TypeError, ValueError):
+            distance = float(order)
+        candidates.append((distance, order, min(1.0, max(0.0, level))))
+    if not candidates:
+        return None
+    nearest = sorted(candidates)[: max(1, limit)]
+    return min(item[2] for item in nearest)
+
+
 def observation_from_tiles(
     crossing: Crossing,
     tile_responses: Iterable[TileResponse],
@@ -206,9 +231,11 @@ def observation_from_tiles(
     coverage = next((str(value) for value in coverage_values if value is not None), None)
     closures = [_value(feature.properties, "road_closure") for feature in all_features]
     closure = any(bool(value) for value in closures) if closures else None
+    all_features.sort(key=lambda feature: feature.distance_m)
     directional = {
         str(index): {
             "traffic_level": _level(feature.properties),
+            "distance_m": round(feature.distance_m, 2),
             "left_hand_traffic": _value(feature.properties, "left_hand_traffic"),
             "road_category": _value(feature.properties, "road_category", "road_type"),
         }

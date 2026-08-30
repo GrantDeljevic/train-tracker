@@ -15,14 +15,19 @@ from .detection import classify_traffic
 from .models import Crossing, CrossingEvent, SystemState, TrafficObservation
 from .sheets import GoogleSheetsArchive
 from .tomtom import RequestBudgetExceeded, TileKey, TomTomError
-from .traffic import TileMapping, observation_from_tiles
+from .traffic import TileMapping, observation_from_tiles, representative_flow_level
 from .train_tracker import refresh_hypotheses
 from .usage import UsageService, usage_month
 
 LOGGER = logging.getLogger(__name__)
 
 GROUP_OFFSETS = {"Battle Creek": 0, "Lansing": 20, "Durand": 40}
-SCHEDULE_STATE_VERSION = 3
+SCHEDULE_STATE_VERSION = 4
+
+
+def _observation_representative_minimum(observation: TrafficObservation) -> float | None:
+    representative = representative_flow_level(observation.directional_values)
+    return representative if representative is not None else observation.traffic_level_min
 
 
 def interval_for(crossing: Crossing, burst: bool = False, projected: int | None = None) -> int:
@@ -82,6 +87,8 @@ class PollScheduler:
         self.initial_poll_all = initial_poll_all
         self.last_polled: dict[int, datetime] = {}
         self.burst_until: dict[str, datetime] = {}
+        self.last_valid_by_group: dict[str, datetime] = {}
+        self.detector_state: dict[str, dict] = {}
         self.last_run: datetime | None = None
         self.last_error: str | None = None
         self.stop_event = asyncio.Event()
@@ -109,6 +116,24 @@ class PollScheduler:
                 for group, value in (state.get("burst_until") or {}).items()
                 if (parsed := self._parse_time(value)) is not None
             }
+            self.last_valid_by_group = {
+                str(group): parsed
+                for group, value in (state.get("last_valid_by_group") or {}).items()
+                if (parsed := self._parse_time(value)) is not None
+            }
+            for fra_id, value in (state.get("detector_state") or {}).items():
+                if fra_id not in crossings or not isinstance(value, dict):
+                    continue
+                restored = {
+                    key: value[key]
+                    for key in (
+                        "previous", "baseline", "previous_min", "baseline_min",
+                        "previous_directional_values", "last_observed_at",
+                    )
+                    if key in value
+                }
+                if restored:
+                    self.detector_state[str(fra_id)] = restored
             if int(state.get("version") or 1) < 2:
                 # Version 1 bootstrapped every crossing at one timestamp in
                 # serverless mode. Re-anchor that legacy snapshot to the
@@ -189,15 +214,16 @@ class PollScheduler:
             # Historical observations/events belong in the append-only Sheets
             # archive. Keeping them in the cold-start snapshot made the JSON
             # cell grow past Sheets' 50,000-character limit after only a few
-            # hours. A restart may therefore need fresh anomalies to rebuild
-            # in-memory detector state; cadence and quota state are the durable
-            # pieces required to resume safe polling immediately.
+            # hours. Keep only the compact detector context and group health
+            # needed to resume safe detection after a Cloud Run cold start.
         return {
             "version": SCHEDULE_STATE_VERSION,
             "last_polled": {crossings[crossing_id].fra_id: moment.isoformat() for crossing_id, moment in self.last_polled.items() if crossing_id in crossings},
             "burst_until": {group: moment.isoformat() for group, moment in self.burst_until.items() if moment > now},
             "last_run": self.last_run.isoformat() if self.last_run else None,
             "last_error": self.last_error,
+            "last_valid_by_group": {group: moment.isoformat() for group, moment in self.last_valid_by_group.items()},
+            "detector_state": self.detector_state,
             "usage": self.usage.snapshot(),
         }
 
@@ -234,9 +260,39 @@ class PollScheduler:
                 .limit(20)
             ).all()
         )
-        previous = observations[0].traffic_level_median if observations else None
+        previous_observation = observations[0] if observations else None
+        previous = previous_observation.traffic_level_median if previous_observation else None
         levels = [item.traffic_level_median for item in observations if item.traffic_level_median is not None]
-        return previous, median(levels) if levels else None
+        minimums = [_observation_representative_minimum(item) for item in observations]
+        minimums = [value for value in minimums if value is not None]
+        return {
+            "previous": previous,
+            "baseline": median(levels) if levels else None,
+            "previous_min": _observation_representative_minimum(previous_observation) if previous_observation else None,
+            "baseline_min": median(minimums) if minimums else None,
+        }
+
+    def _detector_metrics(self, crossing: Crossing, session, now: datetime) -> dict:
+        metrics = self._previous_metrics(session, crossing.id, now)
+        saved = self.detector_state.get(crossing.fra_id) or {}
+        for key in ("previous", "baseline", "previous_min", "baseline_min"):
+            if metrics.get(key) is None and saved.get(key) is not None:
+                metrics[key] = saved[key]
+        return metrics
+
+    def _remember_detector_state(self, crossing: Crossing, result, metrics: dict) -> None:
+        if not result.usable or result.traffic_level_median is None:
+            return
+        representative_min = representative_flow_level(result.directional_values)
+        self.detector_state[crossing.fra_id] = {
+            "previous": result.traffic_level_median,
+            "baseline": metrics.get("baseline") if metrics.get("baseline") is not None else result.traffic_level_median,
+            "previous_min": representative_min,
+            "baseline_min": metrics.get("baseline_min") if metrics.get("baseline_min") is not None else representative_min,
+            "previous_directional_values": result.directional_values,
+            "last_observed_at": result.observed_at.isoformat(),
+        }
+        self.last_valid_by_group[crossing.group_name] = result.observed_at
 
     def _create_event_if_new(self, session, crossing: Crossing, observation: TrafficObservation, decision) -> CrossingEvent | None:
         if decision.severity not in {"WEAK", "MODERATE", "STRONG"}:
@@ -262,7 +318,12 @@ class PollScheduler:
                 return None
         previous = session.scalar(
             select(TrafficObservation)
-            .where(TrafficObservation.crossing_id == crossing.id, TrafficObservation.observed_at < observation.observed_at)
+            .where(
+                TrafficObservation.crossing_id == crossing.id,
+                TrafficObservation.observed_at < observation.observed_at,
+                TrafficObservation.usable.is_(True),
+                TrafficObservation.severity == "NORMAL",
+            )
             .order_by(TrafficObservation.observed_at.desc())
             .limit(1)
         )
@@ -281,6 +342,9 @@ class PollScheduler:
                 "previous_level": previous.traffic_level_median if previous else None,
                 "baseline_level": decision.baseline,
                 "drop": decision.drop,
+                "min_drop": decision.min_drop,
+                "abrupt_drop": decision.abrupt_drop,
+                "directional_collapse": decision.directional_collapse,
                 "score": decision.score,
                 "feature_count": observation.feature_count,
                 "status": observation.status,
@@ -367,8 +431,18 @@ class PollScheduler:
             try:
                 responses = [self.tomtom.fetch_tile(key) for key in tile_key]
                 result = observation_from_tiles(crossing, responses, now)
-                previous, baseline = self._previous_metrics(session, crossing.id, now)
-                decision = classify_traffic(result.traffic_level_median, previous, baseline, result.road_closure)
+                metrics = self._detector_metrics(crossing, session, now)
+                representative_min = representative_flow_level(result.directional_values)
+                decision = classify_traffic(
+                    result.traffic_level_median,
+                    metrics["previous"],
+                    metrics["baseline"],
+                    result.road_closure,
+                    current_min=representative_min,
+                    previous_min=metrics["previous_min"],
+                    baseline_min=metrics["baseline_min"],
+                    feature_count=result.feature_count,
+                )
                 observation = TrafficObservation(
                     crossing_id=crossing.id,
                     observed_at=result.observed_at,
@@ -388,6 +462,7 @@ class PollScheduler:
                     tile_key=",".join(key.as_string() for key in tile_key),
                 )
                 session.add(observation)
+                self._remember_detector_state(crossing, result, metrics)
                 created = self._create_event_if_new(session, crossing, observation, decision)
                 session.flush()
                 quality = update_crossing_quality(session, crossing, now)
