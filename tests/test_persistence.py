@@ -1,3 +1,4 @@
+import json
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import create_engine, select
@@ -184,3 +185,43 @@ def test_runtime_snapshot_carries_the_monotonic_usage_checkpoint():
 
     assert state["usage"]["month"] == usage_month()
     assert state["usage"]["actual_request_count"] == 1
+
+
+def test_runtime_snapshot_does_not_embed_historical_rows():
+    factory = _db()
+    now = datetime(2026, 1, 1, 7, 0, tzinfo=timezone.utc)
+    with factory() as session:
+        crossing = _crossing(1)
+        session.add(crossing)
+        for index in range(200):
+            observed_at = now - timedelta(minutes=index)
+            session.add(TrafficObservation(
+                crossing_id=crossing.id,
+                observed_at=observed_at,
+                traffic_level_min=0.2,
+                traffic_level_median=0.2,
+                feature_count=1,
+                usable=True,
+                severity="STRONG",
+                status="OK",
+                error_detail="x" * 500,
+            ))
+        session.add(CrossingEvent(
+            id=1,
+            crossing_id=crossing.id,
+            event_time_estimate=now,
+            event_time_low=now - timedelta(minutes=1),
+            event_time_high=now + timedelta(minutes=1),
+            severity="STRONG",
+            evidence_json={"detail": "x" * 500},
+            created_at=now,
+        ))
+        session.commit()
+
+    scheduler = PollScheduler(object(), session_factory=factory)
+    state = scheduler._runtime_state(now)
+
+    assert state["version"] == 3
+    assert "observations" not in state
+    assert "events" not in state
+    assert len(json.dumps(state, separators=(",", ":"))) < 45_000

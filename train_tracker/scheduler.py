@@ -22,7 +22,7 @@ from .usage import UsageService, usage_month
 LOGGER = logging.getLogger(__name__)
 
 GROUP_OFFSETS = {"Battle Creek": 0, "Lansing": 20, "Durand": 40}
-SCHEDULE_STATE_VERSION = 2
+SCHEDULE_STATE_VERSION = 3
 
 
 def interval_for(crossing: Crossing, burst: bool = False, projected: int | None = None) -> int:
@@ -109,7 +109,7 @@ class PollScheduler:
                 for group, value in (state.get("burst_until") or {}).items()
                 if (parsed := self._parse_time(value)) is not None
             }
-            if int(state.get("version") or 1) < SCHEDULE_STATE_VERSION:
+            if int(state.get("version") or 1) < 2:
                 # Version 1 bootstrapped every crossing at one timestamp in
                 # serverless mode. Re-anchor that legacy snapshot to the
                 # configured phases once, without changing observations.
@@ -186,52 +186,12 @@ class PollScheduler:
     def _runtime_state(self, now: datetime) -> dict:
         with self.session_factory() as session:
             crossings = {crossing.id: crossing for crossing in session.scalars(select(Crossing)).all()}
-            observations = list(session.scalars(select(TrafficObservation).order_by(TrafficObservation.observed_at.desc()).limit(200)).all())
-            per_crossing: dict[int, int] = {}
-            recent_observations = []
-            for item in observations:
-                per_crossing[item.crossing_id] = per_crossing.get(item.crossing_id, 0)
-                if per_crossing[item.crossing_id] >= 20:
-                    continue
-                per_crossing[item.crossing_id] += 1
-                crossing = crossings.get(item.crossing_id)
-                if not crossing:
-                    continue
-                recent_observations.append({
-                    "fra_id": crossing.fra_id,
-                    "observed_at": item.observed_at.isoformat(),
-                    "tile_fetched_at": item.tile_fetched_at.isoformat() if item.tile_fetched_at else None,
-                    "traffic_level_min": item.traffic_level_min,
-                    "traffic_level_median": item.traffic_level_median,
-                    "directional_values": item.directional_values,
-                    "road_coverage": item.road_coverage,
-                    "road_closure": item.road_closure,
-                    "feature_count": item.feature_count,
-                    "usable": item.usable,
-                    "severity": item.severity,
-                    "anomaly_drop": item.anomaly_drop,
-                    "anomaly_score": item.anomaly_score,
-                    "status": item.status,
-                    "error_detail": item.error_detail,
-                    "tile_key": item.tile_key,
-                })
-            cutoff = now - timedelta(hours=6)
-            events = session.scalars(select(CrossingEvent).where(CrossingEvent.event_time_estimate >= cutoff).order_by(CrossingEvent.event_time_estimate)).all()
-            recent_events = []
-            for item in events:
-                crossing = crossings.get(item.crossing_id)
-                if not crossing:
-                    continue
-                recent_events.append({
-                    "id": item.id,
-                    "fra_id": crossing.fra_id,
-                    "event_time_estimate": item.event_time_estimate.isoformat(),
-                    "event_time_low": item.event_time_low.isoformat() if item.event_time_low else None,
-                    "event_time_high": item.event_time_high.isoformat() if item.event_time_high else None,
-                    "severity": item.severity,
-                    "evidence_json": item.evidence_json,
-                    "created_at": item.created_at.isoformat() if item.created_at else None,
-                })
+            # Historical observations/events belong in the append-only Sheets
+            # archive. Keeping them in the cold-start snapshot made the JSON
+            # cell grow past Sheets' 50,000-character limit after only a few
+            # hours. A restart may therefore need fresh anomalies to rebuild
+            # in-memory detector state; cadence and quota state are the durable
+            # pieces required to resume safe polling immediately.
         return {
             "version": SCHEDULE_STATE_VERSION,
             "last_polled": {crossings[crossing_id].fra_id: moment.isoformat() for crossing_id, moment in self.last_polled.items() if crossing_id in crossings},
@@ -239,8 +199,6 @@ class PollScheduler:
             "last_run": self.last_run.isoformat() if self.last_run else None,
             "last_error": self.last_error,
             "usage": self.usage.snapshot(),
-            "observations": recent_observations,
-            "events": recent_events,
         }
 
     def _save_runtime_state(self, now: datetime) -> None:

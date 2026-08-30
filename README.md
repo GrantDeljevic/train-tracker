@@ -23,8 +23,10 @@ Open `http://127.0.0.1:8000/`. The poller runs inside the web process when
 `ENABLE_POLLER=1` and `SERVERLESS_POLLING=0`; production must use exactly one
 web worker in that mode. For Cloud Run, set `SERVERLESS_POLLING=1` and have
 Cloud Scheduler call the authenticated `POST /internal/poll` endpoint once per
-minute. The service restores recent observations/events and scheduling state
-from the non-historical `Runtime State` Sheet tab after a cold start.
+minute. The service restores scheduling and quota state from the
+non-historical `Runtime State` Sheet tab after a cold start. Historical
+observations and events remain append-only in their dedicated tabs; an
+in-flight train hypothesis may need to be reconstructed after a cold start.
 
 ## Configuration
 

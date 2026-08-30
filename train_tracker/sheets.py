@@ -48,6 +48,9 @@ TAB_HEADERS: dict[str, list[str]] = {
 }
 INDEX_HEADERS = ["period", "spreadsheet_id", "title", "created_at"]
 RUNTIME_HEADERS = ["updated_at", "state_json"]
+# Google Sheets rejects a value once a single cell exceeds 50,000 characters.
+# Keep a little headroom for future fields and provider-side encoding details.
+RUNTIME_STATE_MAX_CHARS = 45_000
 
 
 class SheetsError(RuntimeError):
@@ -150,6 +153,44 @@ class GoogleSheetsArchive:
             labels.append(chr(ord("A") + remainder))
         return "".join(reversed(labels))
 
+    @staticmethod
+    def _is_grid_limit_error(error: Exception) -> bool:
+        message = str(error).lower()
+        return "exceeds grid limits" in message or "grid limits" in message
+
+    @classmethod
+    def _ensure_grid_capacity(cls, worksheet: Any, required_rows: int, required_cols: int) -> None:
+        """Grow a tab before writing a range beyond its current grid.
+
+        Existing archive tabs were initially created with only 100 rows. The
+        pygsheets worksheet object caches grid dimensions, so refresh after a
+        growth request when possible and verify the local dimensions before
+        issuing the values update.
+        """
+        current_rows = int(getattr(worksheet, "rows", 0) or 0)
+        current_cols = int(getattr(worksheet, "cols", 0) or 0)
+        if required_rows <= current_rows and required_cols <= current_cols:
+            return
+
+        resize = getattr(worksheet, "resize", None)
+        if resize is None:
+            raise SheetsError(
+                f"worksheet grid is {current_rows}x{current_cols}, "
+                f"but write requires {required_rows}x{required_cols}"
+            )
+        resize(rows=max(required_rows, current_rows), cols=max(required_cols, current_cols))
+
+        refresh = getattr(worksheet, "refresh", None)
+        if refresh is not None:
+            refresh()
+
+        # A provider refresh may reveal dimensions different from the local
+        # cache. Issue one corrective growth request if it is still short.
+        current_rows = int(getattr(worksheet, "rows", 0) or 0)
+        current_cols = int(getattr(worksheet, "cols", 0) or 0)
+        if required_rows > current_rows or required_cols > current_cols:
+            resize(rows=max(required_rows, current_rows), cols=max(required_cols, current_cols))
+
     @classmethod
     def _write_rows(
         cls,
@@ -178,17 +219,24 @@ class GoogleSheetsArchive:
             matrix.append(list(row) + [""] * (expected_cols - len(row)))
 
         end_row = start_row + len(matrix) - 1
-        current_rows = int(getattr(worksheet, "rows", 0) or 0)
-        current_cols = int(getattr(worksheet, "cols", 0) or 0)
-        required_rows = max(current_rows, end_row)
-        required_cols = max(current_cols, expected_cols)
-        if required_rows > current_rows or required_cols > current_cols:
-            resize = getattr(worksheet, "resize", None)
-            if resize is not None:
-                resize(rows=required_rows, cols=required_cols)
-
         end_col = cls._column_label(expected_cols)
-        worksheet.update_values(f"A{start_row}:{end_col}{end_row}", matrix)
+        cls._ensure_grid_capacity(worksheet, end_row, expected_cols)
+        cell_range = f"A{start_row}:{end_col}{end_row}"
+        try:
+            worksheet.update_values(cell_range, matrix)
+        except Exception as error:
+            if not cls._is_grid_limit_error(error):
+                raise
+
+            # A stale worksheet object can still report its old grid after a
+            # resize. Refresh and retry the same explicit range once. The
+            # range is idempotent, so an uncertain first response cannot
+            # create a duplicate append.
+            refresh = getattr(worksheet, "refresh", None)
+            if refresh is not None:
+                refresh()
+            cls._ensure_grid_capacity(worksheet, end_row, expected_cols)
+            worksheet.update_values(cell_range, matrix)
 
     @classmethod
     def _worksheet(cls, spreadsheet: Any, title: str, headers: list[str], pygsheets_module: Any) -> Any:
@@ -431,10 +479,16 @@ class GoogleSheetsArchive:
                 return False
             try:
                 worksheet = self._worksheets[RUNTIME_TAB]
+                serialized_state = _json(state)
+                if len(serialized_state) > RUNTIME_STATE_MAX_CHARS:
+                    raise SheetsError(
+                        f"runtime state is {len(serialized_state)} characters; "
+                        f"maximum safe size is {RUNTIME_STATE_MAX_CHARS}"
+                    )
                 self._write_rows(
                     worksheet,
                     2,
-                    [[_iso(recorded_at or datetime.now(timezone.utc)), _json(state)]],
+                    [[_iso(recorded_at or datetime.now(timezone.utc)), serialized_state]],
                     len(RUNTIME_HEADERS),
                 )
                 return True

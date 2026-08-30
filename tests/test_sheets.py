@@ -151,6 +151,47 @@ def test_append_rows_uses_exact_range_and_grows_existing_grid():
     assert worksheet.cols == 20
 
 
+def test_append_rows_retries_after_stale_grid_limit_response():
+    class StaleGridWorksheet(FakeWorksheet):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.resize_calls = 0
+
+        def resize(self, rows=None, cols=None):
+            self.resize_calls += 1
+            if self.resize_calls > 1:
+                super().resize(rows=rows, cols=cols)
+
+        def update_values(self, cell, values, **kwargs):
+            end_row = int(str(cell).rsplit("T", 1)[-1])
+            if end_row > self.rows:
+                raise RuntimeError("Range exceeds grid limits")
+            super().update_values(cell, values, **kwargs)
+
+    worksheet = StaleGridWorksheet(OBSERVATION_TAB, rows=103, cols=20)
+    worksheet.values = [["header"] * 20 for _ in range(103)]
+
+    GoogleSheetsArchive._append_rows(worksheet, [["value"] * 20, ["value"] * 20], 20)
+
+    assert worksheet.resize_calls == 2
+    assert worksheet.updates[-1][0] == "A104:T105"
+    assert len(worksheet.values) == 105
+
+
+def test_runtime_state_rejects_oversized_single_cell(monkeypatch):
+    monkeypatch.setitem(sys.modules, "pygsheets", SimpleNamespace(WorksheetNotFound=WorksheetNotFound))
+    archive_settings = replace(settings, sheets_spreadsheet_id="base", sheets_required=True)
+    archive = GoogleSheetsArchive(archive_settings, client=FakeClient())
+    archive.connected = True
+    worksheet = FakeWorksheet(RUNTIME_TAB, rows=100, cols=2)
+    archive._worksheets = {RUNTIME_TAB: worksheet}
+
+    assert archive.save_runtime_state({"payload": "x" * 50_000}) is False
+    assert archive.health()["healthy"] is False
+    assert archive.health()["queued_rows"] == 0
+    assert not worksheet.updates
+
+
 def test_failed_flush_keeps_only_unsent_rows_and_reports_unhealthy(monkeypatch):
     class FailingWorksheet(FakeWorksheet):
         def update_values(self, cell, values, **kwargs):

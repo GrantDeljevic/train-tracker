@@ -237,7 +237,7 @@ def api_status() -> dict:
                     "poller_last_run": (health.value_json or {}).get("last_run") if health else None,
                     "poller_error": (health.value_json or {}).get("last_error") if health else None,
                     "api_key_configured": bool(settings.tomtom_api_key),
-                    "runtime_state_backend": "process-memory",
+                    "runtime_state_backend": "sheets-snapshot" if settings.serverless_polling else "process-memory",
                     "historical_persistence": historical_health,
                     "usage": usage,
                 },
